@@ -437,6 +437,7 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 		return nil, fmt.Errorf("'input' array must contain at least one item")
 	}
 	messages := make([]any, 0, len(items))
+	pendingReasoning := ""
 	for i, itemRaw := range items {
 		var item map[string]json.RawMessage
 		if err := json.Unmarshal(itemRaw, &item); err != nil {
@@ -457,7 +458,28 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 			if err != nil {
 				return nil, fmt.Errorf("input[%d]: %w", i, err)
 			}
-			messages = append(messages, map[string]any{"role": role, "content": content})
+			message := map[string]any{"role": role, "content": content}
+			if role == "assistant" && pendingReasoning != "" {
+				message["reasoning_content"] = pendingReasoning
+			}
+			pendingReasoning = ""
+			messages = append(messages, message)
+		case "reasoning":
+			var reasoning struct {
+				Summary []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"summary"`
+			}
+			if err := json.Unmarshal(itemRaw, &reasoning); err != nil {
+				return nil, fmt.Errorf("input[%d] reasoning summary is invalid", i)
+			}
+			for _, part := range reasoning.Summary {
+				if part.Type != "summary_text" {
+					return nil, fmt.Errorf("input[%d] reasoning summary type is unsupported", i)
+				}
+				pendingReasoning += part.Text
+			}
 		case "function_call":
 			var call struct {
 				CallID    string `json:"call_id"`
@@ -485,7 +507,12 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 			if !merged {
 				messages = append(messages, map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{toolCall}})
 			}
+			if pendingReasoning != "" {
+				messages[len(messages)-1].(map[string]any)["reasoning_content"] = pendingReasoning
+				pendingReasoning = ""
+			}
 		case "function_call_output":
+			pendingReasoning = ""
 			var out struct {
 				CallID string `json:"call_id"`
 				Output any    `json:"output"`
@@ -501,6 +528,9 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 		default:
 			return nil, fmt.Errorf("input[%d].type '%s' is not supported", i, typ)
 		}
+	}
+	if pendingReasoning != "" {
+		messages = append(messages, map[string]any{"role": "assistant", "content": nil, "reasoning_content": pendingReasoning})
 	}
 	return messages, nil
 }
@@ -713,6 +743,9 @@ func chatResponseToResponse(base, chat map[string]any) (map[string]any, []any, e
 func chatMessageToResponseOutput(message map[string]any) ([]any, []any) {
 	output := []any{}
 	generated := []any{}
+	if reasoning, _ := message["reasoning_content"].(string); reasoning != "" {
+		output = append(output, responseReasoningItem(newResponseID("rs"), "completed", reasoning))
+	}
 	if content, ok := message["content"].(string); ok && content != "" {
 		item := responseMessageItem(newResponseID("msg"), "completed", content)
 		output = append(output, item)
@@ -735,7 +768,29 @@ func chatMessageToResponseOutput(message map[string]any) ([]any, []any) {
 		}
 		generated = append(generated, map[string]any{"role": "assistant", "content": nil, "tool_calls": calls})
 	}
+	generated = preserveResponseReasoning(generated, message["reasoning_content"])
 	return output, generated
+}
+
+// The summary channel carries only reasoning text actually exposed by the upstream.
+// It is a compatibility mapping, not an independently generated summary.
+func responseReasoningItem(id, status, text string) map[string]any {
+	return map[string]any{"id": id, "type": "reasoning", "status": status,
+		"summary": []any{map[string]any{"type": "summary_text", "text": text}}}
+}
+
+func preserveResponseReasoning(generated []any, raw any) []any {
+	text, _ := raw.(string)
+	if text == "" {
+		return generated
+	}
+	if len(generated) == 0 {
+		generated = append(generated, map[string]any{"role": "assistant", "content": nil})
+	}
+	for _, rawMessage := range generated {
+		rawMessage.(map[string]any)["reasoning_content"] = text
+	}
+	return generated
 }
 
 func anySlice(value any) []any {

@@ -174,7 +174,9 @@ for event in client.responses.create(
 
 支持字符串 / 消息数组 `input`、`instructions`、`input_text`、图片 URL / Data URI、assistant `output_text`、自定义 `function` 工具及其返回结果（字符串）、`tool_choice`、`reasoning.effort` 和主要生成参数。工具由调用方执行，网关只传递工具调用与结果。`prompt.mode=custom` 会沿用现有规则替换 `instructions`；希望透传时设置 `passthrough`。
 
-兼容 DeepSeek Harness / Pi 等客户端的普通消息与 assistant 历史消息（包括 `input_text` / `output_text`）。以下合法可选偏好会被接受：`reasoning.summary`、`include:["reasoning.encrypted_content"]`、`text.format.type="text"`、`text.verbosity`、`stream_options.include_obfuscation`、`prompt_cache_key` 和 `prompt_cache_retention`。上游未提供对应能力，网关不生成推理摘要、加密推理或混淆数据，也不保证 verbosity 或缓存时长生效；这些字段不会直接透传给 Chat 上游。`reasoning.effort` 接受 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`，以及 Harness 使用的 `max` 扩展档位，并沿用 Chat 请求的映射与上游降级规则；`max` 不代表所有模型都原生支持该档位。
+兼容 DeepSeek Harness / Pi 等客户端的普通消息与 assistant 历史消息（包括 `input_text` / `output_text`）。以下合法可选偏好会被接受：`reasoning.summary`、`include:["reasoning.encrypted_content"]`、`text.format.type="text"`、`text.verbosity`、`stream_options.include_obfuscation`、`prompt_cache_key` 和 `prompt_cache_retention`。这些字段不会直接透传给 Chat 上游；网关不生成加密推理或混淆数据，也不保证 verbosity 或缓存时长生效。`reasoning.effort` 接受 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`，以及 Harness 使用的 `max` 扩展档位，并沿用 Chat 请求的映射与上游降级规则；`max` 不代表所有模型都原生支持该档位。
+
+当上游返回非空 `reasoning_content` 时，网关将其原样映射为独立的 `reasoning` 输出项（`summary_text`），流式发送 `response.reasoning_summary_part.added/done` 和 `response.reasoning_summary_text.delta/done`，供 Harness / Pi 实时显示思考过程。不依赖模型名白名单，也不要求显式指定 summary；上游未返回推理文本时不生成 reasoning 项。summary 是协议兼容载体，不额外生成或压缩摘要，`concise` / `detailed` 不控制文本长度。存储续轮与客户端回传 reasoning 输出项均保留推理文本。
 
 流式输出是实时的 `response.created`、`response.output_text.delta`、函数参数增量和终态事件，具有递增 `sequence_number`。默认保存响应；可用 `GET /v1/responses/{id}` 查询，`DELETE /v1/responses/{id}` 删除。`store:false` 不保存。
 

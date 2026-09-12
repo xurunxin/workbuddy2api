@@ -23,26 +23,29 @@ type streamToolState struct {
 // delta arrives. It intentionally implements http.Flusher so upstream.Stream
 // retains its per-frame flush behavior all the way to the client.
 type responsesStreamWriter struct {
-	dst        http.ResponseWriter
-	header     http.Header
-	base       map[string]any
-	onFinal    func(map[string]any, []any)
-	buf        bytes.Buffer
-	sequence   int
-	started    bool
-	done       bool
-	failed     bool
-	status     int
-	writeErr   error
-	finish     string
-	messageID  string
-	messageIdx int
-	messageOn  bool
-	textOn     bool
-	text       strings.Builder
-	tools      map[int]*streamToolState
-	toolOrder  []int
-	usage      any
+	dst          http.ResponseWriter
+	header       http.Header
+	base         map[string]any
+	onFinal      func(map[string]any, []any)
+	buf          bytes.Buffer
+	sequence     int
+	started      bool
+	done         bool
+	failed       bool
+	status       int
+	writeErr     error
+	finish       string
+	messageID    string
+	messageIdx   int
+	messageOn    bool
+	textOn       bool
+	text         strings.Builder
+	tools        map[int]*streamToolState
+	toolOrder    []int
+	usage        any
+	reasoningID  string
+	reasoningIdx int
+	reasoning    strings.Builder
 }
 
 func newResponsesStreamWriter(dst http.ResponseWriter, base map[string]any, onFinal func(map[string]any, []any)) *responsesStreamWriter {
@@ -127,6 +130,9 @@ func (w *responsesStreamWriter) Flush() {
 }
 
 func (w *responsesStreamWriter) consumeFrame(frame string) {
+	if w.done {
+		return
+	}
 	var payload string
 	for _, line := range strings.Split(strings.ReplaceAll(frame, "\r\n", "\n"), "\n") {
 		if strings.HasPrefix(line, "data:") {
@@ -171,6 +177,9 @@ func (w *responsesStreamWriter) consumeFrame(frame string) {
 		if delta == nil {
 			continue
 		}
+		if text, _ := delta["reasoning_content"].(string); text != "" {
+			w.reasoningDelta(text)
+		}
 		if text, ok := delta["content"].(string); ok && text != "" {
 			w.textDelta(text)
 		}
@@ -183,6 +192,21 @@ func (w *responsesStreamWriter) consumeFrame(frame string) {
 			}
 		}
 	}
+}
+
+func (w *responsesStreamWriter) reasoningDelta(delta string) {
+	if w.reasoningID == "" {
+		w.reasoningID = newResponseID("rs")
+		w.reasoningIdx = len(w.currentOutput())
+		item := responseReasoningItem(w.reasoningID, "in_progress", "")
+		item["summary"] = []any{}
+		w.appendOutput(item)
+		w.emit("response.output_item.added", map[string]any{"output_index": w.reasoningIdx, "item": cloneMap(item)})
+		w.emit("response.reasoning_summary_part.added", map[string]any{"item_id": w.reasoningID, "output_index": w.reasoningIdx, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}})
+	}
+	w.reasoning.WriteString(delta)
+	w.currentOutput()[w.reasoningIdx] = responseReasoningItem(w.reasoningID, "in_progress", w.reasoning.String())
+	w.emit("response.reasoning_summary_text.delta", map[string]any{"item_id": w.reasoningID, "output_index": w.reasoningIdx, "summary_index": 0, "delta": delta})
 }
 
 func (w *responsesStreamWriter) ensureMessage() {
@@ -258,6 +282,13 @@ func (w *responsesStreamWriter) complete() {
 	}
 	output := w.currentOutput()
 	generated := []any{}
+	if w.reasoningID != "" {
+		text := w.reasoning.String()
+		w.emit("response.reasoning_summary_text.done", map[string]any{"item_id": w.reasoningID, "output_index": w.reasoningIdx, "summary_index": 0, "text": text})
+		w.emit("response.reasoning_summary_part.done", map[string]any{"item_id": w.reasoningID, "output_index": w.reasoningIdx, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
+		output[w.reasoningIdx] = responseReasoningItem(w.reasoningID, "completed", text)
+		w.emit("response.output_item.done", map[string]any{"output_index": w.reasoningIdx, "item": output[w.reasoningIdx]})
+	}
 	if w.messageOn {
 		text := w.text.String()
 		if w.textOn {
@@ -308,6 +339,7 @@ func (w *responsesStreamWriter) complete() {
 	if len(toolCalls) > 0 {
 		generated = append(generated, map[string]any{"role": "assistant", "content": nil, "tool_calls": toolCalls})
 	}
+	generated = preserveResponseReasoning(generated, w.reasoning.String())
 	final := cloneMap(w.base)
 	final["output"] = output
 	final["usage"] = w.usage
