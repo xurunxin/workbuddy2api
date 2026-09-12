@@ -391,6 +391,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if u, ok := r.Context().Value(usageContextKey{}).(*requestUsage); ok {
 				u.input, u.output, u.known = stats.input, int64(stats.tokens), stats.hasTokenUsage
+				u.cached = stats.cached
 			}
 		}()
 		if peek.Stream {

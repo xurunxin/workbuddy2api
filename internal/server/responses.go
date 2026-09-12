@@ -919,6 +919,9 @@ func responseUsage(raw any) any {
 		"input_tokens_details":  map[string]any{"cached_tokens": 0},
 		"output_tokens_details": map[string]any{"reasoning_tokens": 0},
 	}
+	if cached := numericValue(u["prompt_cache_hit_tokens"]); cached != nil {
+		result["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+	}
 	if details, ok := u["prompt_tokens_details"].(map[string]any); ok {
 		if cached := numericValue(details["cached_tokens"]); cached != nil {
 			result["input_tokens_details"] = map[string]any{"cached_tokens": cached}

@@ -11,11 +11,13 @@ import (
 )
 
 type Totals struct {
-	Requests int64 `json:"requests"`
-	Failures int64 `json:"failures"`
-	Input    int64 `json:"input_tokens"`
-	Output   int64 `json:"output_tokens"`
-	Missing  int64 `json:"missing_usage"`
+	Requests     int64 `json:"requests"`
+	Failures     int64 `json:"failures"`
+	Input        int64 `json:"input_tokens"`
+	Output       int64 `json:"output_tokens"`
+	Cached       int64 `json:"cached_tokens"`
+	CacheMissing int64 `json:"cache_missing_usage"`
+	Missing      int64 `json:"missing_usage"`
 }
 
 type Row struct {
@@ -58,6 +60,18 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s.rows, s.credits = state.Rows, state.Credits
+	// Older files did not collect cache usage; their requests are unknown, not misses.
+	var legacy struct {
+		Rows []map[string]json.RawMessage `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return nil, err
+	}
+	for i, row := range legacy.Rows {
+		if _, ok := row["cache_missing_usage"]; !ok {
+			s.rows[i].CacheMissing = s.rows[i].Requests
+		}
+	}
 	return s, nil
 }
 
@@ -100,7 +114,7 @@ func (s *Store) Credits() []Credit {
 }
 
 // Record persists daily aggregates without storing credentials or prompts.
-func (s *Store) Record(key string, status int, input, output int64, known bool) error {
+func (s *Store) Record(key string, status int, input, output int64, known bool, cached *int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	day := time.Now().UTC().Format("2006-01-02")
@@ -125,6 +139,11 @@ func (s *Store) Record(key string, status int, input, output int64, known bool) 
 		r.Output += output
 	} else {
 		r.Missing++
+	}
+	if cached != nil && *cached >= 0 && (!known || *cached <= input) {
+		r.Cached += *cached
+	} else {
+		r.CacheMissing++
 	}
 	err := s.persist()
 	s.lastError = err != nil

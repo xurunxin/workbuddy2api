@@ -55,6 +55,8 @@ func (s *chatStat) done() {
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
 	input         int64
+	cached        *int64
+	hasInput      bool
 	hasTokenUsage bool
 	br            *bufio.Reader
 	start         time.Time
@@ -94,6 +96,10 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		Usage *struct {
 			CompletionTokens *int   `json:"completion_tokens"`
 			PromptTokens     *int64 `json:"prompt_tokens"`
+			PromptDetails    *struct {
+				Cached *int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CacheHit *int64 `json:"prompt_cache_hit_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -103,9 +109,23 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.hasUsage = true
 		s.tokens = *chunk.Usage.CompletionTokens
 	}
-	if chunk.Usage.PromptTokens != nil && *chunk.Usage.PromptTokens >= 0 && s.hasUsage {
+	if chunk.Usage.PromptTokens != nil && *chunk.Usage.PromptTokens >= 0 {
 		s.input = *chunk.Usage.PromptTokens
-		s.hasTokenUsage = true
+		s.hasInput = true
+	}
+	s.hasTokenUsage = s.hasInput && s.hasUsage
+	cached := chunk.Usage.CacheHit
+	if chunk.Usage.PromptDetails != nil && chunk.Usage.PromptDetails.Cached != nil {
+		cached = chunk.Usage.PromptDetails.Cached
+	}
+	if cached != nil {
+		s.cached = nil
+		if *cached >= 0 {
+			s.cached = cached
+		}
+	}
+	if s.cached != nil && s.hasInput && *s.cached > s.input {
+		s.cached = nil
 	}
 }
 

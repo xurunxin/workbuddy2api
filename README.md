@@ -488,6 +488,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 **敏感度**：日志不含任何 token 明文（详见[安全与合规](#安全与合规)），无落盘日志文件。
 
+管理页用量统计按 UTC 日期及 API Key 汇总输入、输出和缓存命中 token。统计接口行字段为 `input_tokens`、`output_tokens`、`cached_tokens`；缓存命中是输入的子集，总 token 为输入加输出，不能再加缓存命中。缓存数据读取上游 `usage.prompt_tokens_details.cached_tokens`，兼容 `prompt_cache_hit_tokens`，标准字段优先。流式与非流式请求均在结束后记录一次，不累计重复 usage 帧。
+
+`missing_usage` 表示缺少完整输入/输出用量的请求数，`cache_missing_usage` 表示未报告有效缓存数据的请求数。未报告不视作零命中，也不估算；升级前的历史请求保留输入/输出数据，缓存数据标记为未报告。
+
 ## 部署运维
 
 ### Docker 镜像

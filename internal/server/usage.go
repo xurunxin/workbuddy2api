@@ -9,6 +9,7 @@ import (
 type usageContextKey struct{}
 type requestUsage struct {
 	input, output int64
+	cached        *int64
 	known         bool
 	failed        bool
 }
@@ -56,7 +57,7 @@ func (h *Handler) trackUsage(w http.ResponseWriter, r *http.Request, key string,
 		if r.Context().Err() != nil {
 			status = 499
 		}
-		if err := h.cfg.Usage.Record(key, status, u.input, u.output, u.known); err != nil {
+		if err := h.cfg.Usage.Record(key, status, u.input, u.output, u.known, u.cached); err != nil {
 			log.Printf("ERR: [usage] persist statistics failed")
 		}
 	}()

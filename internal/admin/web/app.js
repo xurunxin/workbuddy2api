@@ -147,7 +147,7 @@
       const query = new URLSearchParams({from: $("usage-from").value, to: $("usage-to").value});
       const [data, keys] = await Promise.all([api(`usage?${query}`), api("keys")]);
       if (request !== usageRequest || epoch !== state.sessionEpoch) return;
-      const zero = () => ({requests: 0, failures: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0});
+      const zero = () => ({requests: 0, failures: 0, input_tokens: 0, cached_tokens: 0, output_tokens: 0, missing_usage: 0, cache_missing_usage: 0});
       const sum = (a, b) => Object.keys(a).forEach(k => { a[k] += Number(b[k]) || 0; });
       const total = zero(), byKey = new Map(), byDay = new Map();
       (keys.keys || []).forEach(k => byKey.set(k.id, {key: k, totals: zero()}));
@@ -158,9 +158,9 @@
         if (!byDay.has(row.day)) byDay.set(row.day, zero());
         sum(byDay.get(row.day), row);
       });
-      [["requests", "requests"], ["failures", "failures"], ["input", "input_tokens"], ["output", "output_tokens"]].forEach(([id, key]) => { $(`usage-${id}`).textContent = total[key].toLocaleString(); });
+      [["requests", "requests"], ["failures", "failures"], ["input", "input_tokens"], ["output", "output_tokens"], ["cached", "cached_tokens"]].forEach(([id, key]) => { $(`usage-${id}`).textContent = total[key].toLocaleString(); });
       const cells = (body, values) => { const tr = node("tr"); values.forEach(v => tr.append(node("td", typeof v === "number" ? v.toLocaleString() : v))); body.append(tr); };
-      const values = t => [t.requests, t.failures, t.input_tokens, t.output_tokens, t.missing_usage];
+      const values = t => [t.requests, t.failures, t.input_tokens, t.cached_tokens, t.output_tokens, t.missing_usage, t.cache_missing_usage];
       const keyBody = $("usage-keys"), dayBody = $("usage-days"), creditBody = $("usage-credits");
       [keyBody, dayBody, creditBody].forEach(clearChildren);
       [...byKey.values()].sort((a,b) => b.totals.requests-a.totals.requests).forEach(({key, totals}) => cells(keyBody, [key.name + (key.prefix ? ` (${key.prefix})` : ""), key.status === "active" ? "启用" : key.status === "revoked" ? "已废弃" : "—", ...values(totals)]));
@@ -172,7 +172,8 @@
       if (!byKey.size) cells(keyBody, ["暂无 API Key 用量"]);
       if (!byDay.size) cells(dayBody, ["所选日期暂无请求"]);
       if (!(data.credits || []).length) cells(creditBody, ["尚未查询账户积分"]);
-      $("usage-status").textContent = data.persistence_error ? "统计尚未成功落盘，重启可能丢失部分数据，请检查存储权限。" : `缺失用量的请求：${total.missing_usage.toLocaleString()}`;
+      const usageStatus = `缺失用量的请求：${total.missing_usage.toLocaleString()} · 缓存数据未报告的请求：${total.cache_missing_usage.toLocaleString()}`;
+      $("usage-status").textContent = data.persistence_error ? `统计尚未成功落盘，重启可能丢失部分数据，请检查存储权限。${usageStatus}` : usageStatus;
     } catch (err) { if (request === usageRequest && epoch === state.sessionEpoch) $("usage-status").textContent = err.message; }
   }
   $("usage-refresh").addEventListener("click", loadUsage);

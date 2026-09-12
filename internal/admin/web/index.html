@@ -114,17 +114,19 @@
             <label>结束日期<input type="date" id="usage-to" /></label>
           </div>
           <p id="usage-status" role="status"></p>
-          <div class="metric-grid">
+          <div class="metric-grid usage-metrics">
             <article class="metric"><span>请求数</span><strong id="usage-requests">—</strong></article>
             <article class="metric"><span>失败请求</span><strong id="usage-failures">—</strong></article>
             <article class="metric"><span>输入 Token</span><strong id="usage-input">—</strong></article>
             <article class="metric"><span>输出 Token</span><strong id="usage-output">—</strong></article>
+            <article class="metric"><span>缓存命中 Token</span><strong id="usage-cached">—</strong><small>输入 Token 的子集</small></article>
           </div>
+          <p class="usage-note">缓存命中 Token 已包含在输入 Token 中，不会重复计入；若上游未报告缓存字段，请参考“缓存数据缺失”计数。</p>
           <h2>API Key 消耗</h2>
           <p>上游未提供按 Key 的实扣积分。Token 仅采用上游 usage；缺失用量不计为零消耗。</p>
-          <div class="table-wrap"><table><thead><tr><th>API Key</th><th>状态</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>输出 Token</th><th>缺失用量</th></tr></thead><tbody id="usage-keys"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>API Key</th><th>状态</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>缓存命中 Token</th><th>输出 Token</th><th>缺失用量</th><th>缓存数据缺失</th></tr></thead><tbody id="usage-keys"></tbody></table></div>
           <h2>每日用量</h2>
-          <div class="table-wrap"><table><thead><tr><th>日期（UTC）</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>输出 Token</th><th>缺失用量</th></tr></thead><tbody id="usage-days"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>日期（UTC）</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>缓存命中 Token</th><th>输出 Token</th><th>缺失用量</th><th>缓存数据缺失</th></tr></thead><tbody id="usage-days"></tbody></table></div>
           <div class="section-head"><h2>账户积分</h2><button class="button secondary" id="usage-credits-refresh">刷新账户积分</button></div>
           <p>当前有效套餐的已用积分与余额快照，包含其他客户端使用量，不受上方日期筛选影响。</p>
           <p id="usage-credit-total"></p>
