@@ -161,6 +161,45 @@ func TestResponsesOptionalPreferencesCombinedStreamStoreFalse(t *testing.T) {
 	}
 }
 
+func TestResponsesHarnessMaxReasoning(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var outbound map[string]any
+			up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+			up.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if err := json.NewDecoder(r.Body).Decode(&outbound); err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sseOK))}, nil
+			})
+			h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}), Upstream: up})
+			// Redacted regression fixture matching the exported Harness session's
+			// model/effort and the SDK's actual Responses message envelope.
+			body := fmt.Sprintf(`{"model":"deepseek-v4.1-flash","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with OK only."}]}],"stream":%t,"store":false,"reasoning":{"effort":"max","summary":"auto"},"include":["reasoning.encrypted_content"],"prompt_cache_key":"regression-harness-max"}`, stream)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+			}
+			if outbound["reasoning_effort"] != "max" {
+				t.Fatalf("max was lost before upstream execution: %v", outbound["reasoning_effort"])
+			}
+			if stream && !strings.Contains(rec.Body.String(), "event: response.completed\n") {
+				t.Fatalf("stream did not complete: %s", rec.Body)
+			}
+			if !stream {
+				var response map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if response["status"] != "completed" || response["reasoning"].(map[string]any)["effort"] != "max" {
+					t.Fatalf("unexpected response state: %v", response)
+				}
+			}
+		})
+	}
+}
+
 func TestResponsesEmptyIncludeArrayAccepted(t *testing.T) {
 	calls := 0
 	up := newFakeUpstream(t, func(string) (int, string, bool) {

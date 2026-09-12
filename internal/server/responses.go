@@ -637,8 +637,10 @@ func responseToChatBody(req responseCreateRequest, messages []any, conversationI
 			Effort  string `json:"effort"`
 			Summary string `json:"summary"`
 		}
-		if err := decodeResponseOption(req.Reasoning, &reasoning); err != nil || !oneOf(reasoning.Summary, "", "auto", "concise", "detailed") || !oneOf(reasoning.Effort, "", "none", "minimal", "low", "medium", "high", "xhigh") {
-			return nil, nil, nil, "", &responseParameterError{param: "reasoning", error: fmt.Errorf("reasoning must contain a valid effort (none, minimal, low, medium, high or xhigh) and optional summary (auto, concise or detailed)")}
+		// Harness can request max, which the shared Chat execution path already
+		// supports and adapts using the upstream model's supported effort list.
+		if err := decodeResponseOption(req.Reasoning, &reasoning); err != nil || !oneOf(reasoning.Summary, "", "auto", "concise", "detailed") || !oneOf(reasoning.Effort, "", "none", "minimal", "low", "medium", "high", "xhigh", "max") {
+			return nil, nil, nil, "", &responseParameterError{param: "reasoning", error: fmt.Errorf("reasoning must contain a valid effort (none, minimal, low, medium, high, xhigh or max) and optional summary (auto, concise or detailed)")}
 		}
 		reasoningEffort = reasoning.Effort
 		if reasoningEffort != "" {

@@ -92,9 +92,10 @@ func TestNormalizeRoles(t *testing.T) {
 
 func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	efforts := map[string][]string{
-		"glm-5.2":      {"off", "low", "high"},
-		"glm-5.2-mini": {"low", "medium"},
-		"glm-5.2-max":  {"high", "xhigh"},
+		"glm-5.2":        {"off", "low", "high"},
+		"glm-5.2-mini":   {"low", "medium"},
+		"glm-5.2-max":    {"high", "xhigh"},
+		"model-with-max": {"high", "max"},
 	}
 	cases := []struct {
 		name    string
@@ -109,6 +110,10 @@ func TestPrepareBodyOptWithEfforts(t *testing.T) {
 			`{"model":"glm-5.2-max","reasoning_effort":"low"}`, efforts, "reasoning_effort", "high"},
 		{"supported effort passes through unchanged",
 			`{"model":"glm-5.2","reasoning_effort":"low"}`, efforts, "reasoning_effort", "low"},
+		{"max downgrades to the model's highest supported effort",
+			`{"model":"glm-5.2-max","reasoning_effort":"max"}`, efforts, "reasoning_effort", "xhigh"},
+		{"max passes through when supported by the model",
+			`{"model":"model-with-max","reasoning_effort":"max"}`, efforts, "reasoning_effort", "max"},
 		{"camelCase field name downgrades and keeps key",
 			`{"model":"glm-5.2-mini","reasoningEffort":"high"}`, efforts, "reasoningEffort", "medium"},
 		{"unknown model passes through",
