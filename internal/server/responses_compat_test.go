@@ -12,6 +12,47 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
+func TestResponsesFunctionOutputContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, want string
+		invalid            bool
+	}{
+		{"string", `"result"`, "result", false},
+		{"text list", `[{"type":"input_text","text":"first"},{"type":"input_text","text":"第二行"}]`, "first\n第二行", false},
+		{"empty list", `[]`, "", false},
+		{"empty string", `""`, "", false},
+		{"null", `null`, "", true},
+		{"object", `{}`, "", true},
+		{"number", `42`, "", true},
+		{"boolean", `true`, "", true},
+		{"null part", `[null]`, "", true},
+		{"missing text", `[{"type":"input_text"}]`, "", true},
+		{"null text", `[{"type":"input_text","text":null}]`, "", true},
+		{"image without URL", `[{"type":"input_image"}]`, "", true},
+		{"file", `[{"type":"input_file","file_id":"file_1"}]`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reproduce the reported index in a long conversation.
+			prefix := strings.Repeat(`{"role":"user","content":"history"},`, 400)
+			input := `[` + prefix + `{"type":"function_call_output","call_id":"call_1","output":` + tc.output + `}]`
+			messages, err := responseInputToMessages(json.RawMessage(input))
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "input[400] function_call_output.output") {
+					t.Fatalf("expected indexed validation error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := messages[400].(map[string]any)
+			if message["role"] != "tool" || message["tool_call_id"] != "call_1" || message["content"] != tc.want {
+				t.Fatalf("tool message = %v", message)
+			}
+		})
+	}
+}
+
 func TestResponsesOptionalPreferencesAcceptedAndNotForwarded(t *testing.T) {
 	tests := []struct {
 		name  string

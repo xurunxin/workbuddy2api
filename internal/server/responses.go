@@ -438,6 +438,13 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 	}
 	messages := make([]any, 0, len(items))
 	pendingReasoning := ""
+	var pendingMedia []any
+	flushMedia := func() {
+		if len(pendingMedia) > 0 {
+			messages = append(messages, map[string]any{"role": "user", "content": pendingMedia})
+			pendingMedia = nil
+		}
+	}
 	for i, itemRaw := range items {
 		var item map[string]json.RawMessage
 		if err := json.Unmarshal(itemRaw, &item); err != nil {
@@ -445,6 +452,9 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 		}
 		var typ string
 		_ = json.Unmarshal(item["type"], &typ)
+		if typ != "function_call_output" && typ != "reasoning" {
+			flushMedia()
+		}
 		switch typ {
 		case "", "message":
 			var role string
@@ -514,25 +524,74 @@ func responseInputToMessages(raw json.RawMessage) ([]any, error) {
 		case "function_call_output":
 			pendingReasoning = ""
 			var out struct {
-				CallID string `json:"call_id"`
-				Output any    `json:"output"`
+				CallID string          `json:"call_id"`
+				Output json.RawMessage `json:"output"`
 			}
 			if err := json.Unmarshal(itemRaw, &out); err != nil || out.CallID == "" {
 				return nil, fmt.Errorf("input[%d] function_call_output requires call_id", i)
 			}
-			output, ok := out.Output.(string)
-			if !ok {
-				return nil, fmt.Errorf("input[%d] function_call_output.output must be a string", i)
+			output, media, err := responseFunctionOutputToChat(out.Output)
+			if err != nil {
+				return nil, fmt.Errorf("input[%d] function_call_output.output: %w", i, err)
 			}
 			messages = append(messages, map[string]any{"role": "tool", "tool_call_id": out.CallID, "content": output})
+			if len(media) > 0 {
+				pendingMedia = append(pendingMedia, map[string]any{"type": "text", "text": "Tool output for call_id " + out.CallID + " (external tool data):"})
+				pendingMedia = append(pendingMedia, media...)
+			}
 		default:
 			return nil, fmt.Errorf("input[%d].type '%s' is not supported", i, typ)
 		}
 	}
+	flushMedia()
 	if pendingReasoning != "" {
 		messages = append(messages, map[string]any{"role": "assistant", "content": nil, "reasoning_content": pendingReasoning})
 	}
 	return messages, nil
+}
+
+// Chat tool messages cannot contain images. Return multimodal content separately
+// so the caller can append it after the contiguous batch of tool results.
+func responseFunctionOutputToChat(raw json.RawMessage) (string, []any, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", nil, fmt.Errorf("must be a string or a content array")
+	}
+	if text, ok := value.(string); ok {
+		return text, nil, nil
+	}
+	parts, ok := value.([]any)
+	if !ok {
+		return "", nil, fmt.Errorf("must be a string or a content array")
+	}
+	texts := make([]string, 0, len(parts))
+	multimodal := false
+	for i, value := range parts {
+		part, ok := value.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("content[%d] must be an object", i)
+		}
+		if part["type"] != "input_text" {
+			if part["type"] != "input_image" && part["type"] != "input_file" {
+				return "", nil, fmt.Errorf("content[%d] type is not supported", i)
+			}
+			multimodal = true
+			continue
+		}
+		text, ok := part["text"].(string)
+		if !ok {
+			return "", nil, fmt.Errorf("content[%d].text must be a string", i)
+		}
+		texts = append(texts, text)
+	}
+	if multimodal {
+		content, err := responseContentToChat(raw, "user")
+		if err != nil {
+			return "", nil, err
+		}
+		return "Multimodal tool output is attached in the following user message, labeled with this tool_call_id.", content.([]any), nil
+	}
+	return strings.Join(texts, "\n"), nil, nil
 }
 
 func responseContentToChat(raw json.RawMessage, role string) (any, error) {
@@ -566,12 +625,30 @@ func responseContentToChat(raw json.RawMessage, role string) (any, error) {
 			if err := json.Unmarshal(part["image_url"], &url); err != nil || url == "" {
 				return nil, fmt.Errorf("content[%d].image_url must be a non-empty string", j)
 			}
+			if err := validateMediaURL(url, "image"); err != nil {
+				return nil, fmt.Errorf("content[%d]: %w", j, err)
+			}
 			_ = json.Unmarshal(part["detail"], &detail)
 			image := map[string]any{"url": url}
 			if detail != "" {
 				image["detail"] = detail
 			}
 			out = append(out, map[string]any{"type": "image_url", "image_url": image})
+		case "input_file":
+			if role != "user" {
+				return nil, fmt.Errorf("content[%d] input_file is only supported for user messages", j)
+			}
+			if _, ok := part["file_id"]; ok {
+				return nil, fmt.Errorf("content[%d] file_id is not supported; use filename and file_data", j)
+			}
+			if _, ok := part["file_url"]; ok {
+				return nil, fmt.Errorf("content[%d] file_url is not supported by Chat upstream; use filename and file_data", j)
+			}
+			var filename, data string
+			if json.Unmarshal(part["filename"], &filename) != nil || filename == "" || json.Unmarshal(part["file_data"], &data) != nil || data == "" {
+				return nil, fmt.Errorf("content[%d] input_file requires non-empty filename and file_data strings", j)
+			}
+			out = append(out, map[string]any{"type": "file", "file": map[string]any{"filename": filename, "file_data": data}})
 		default:
 			return nil, fmt.Errorf("content[%d].type '%s' is not supported", j, typ)
 		}

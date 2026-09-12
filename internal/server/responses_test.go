@@ -211,7 +211,7 @@ func TestResponsesPreviousResponseContinuesParallelFunctionCalls(t *testing.T) {
 	}
 	id := firstResponse["id"].(string)
 	secondInput := `{"model":"glm-5.2","previous_response_id":"` + id + `","input":[` +
-		`{"type":"function_call_output","call_id":"call_a","output":"A"},` +
+		`{"type":"function_call_output","call_id":"call_a","output":[{"type":"input_text","text":"A"}]},` +
 		`{"type":"function_call_output","call_id":"call_b","output":"B"}]}`
 	second := httptest.NewRecorder()
 	h.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(secondInput)))
@@ -231,6 +231,9 @@ func TestResponsesPreviousResponseContinuesParallelFunctionCalls(t *testing.T) {
 	}
 	if messages[2].(map[string]any)["tool_call_id"] != "call_a" || messages[3].(map[string]any)["tool_call_id"] != "call_b" {
 		t.Fatalf("tool outputs=%v", messages[2:])
+	}
+	if messages[2].(map[string]any)["content"] != "A" || messages[3].(map[string]any)["content"] != "B" {
+		t.Fatalf("tool output content=%v", messages[2:])
 	}
 }
 
