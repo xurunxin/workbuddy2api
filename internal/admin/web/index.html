@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>WorkBuddy 运维控制台</title>
+    <link rel="stylesheet" href="/admin/style.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <span class="brand-mark">W</span
+          ><span>WorkBuddy<small>运维控制台</small></span>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-view="overview">总览</button
+          ><button class="nav-item" data-view="accounts">账号管理</button
+          ><button class="nav-item" data-view="models">模型与积分</button
+          ><button class="nav-item" data-view="keys">API Key</button
+          ><button class="nav-item" data-view="config">服务配置</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="dot" id="side-dot"></span
+          ><span id="side-status">正在连接</span>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <button id="menu-toggle" class="icon-button" aria-label="打开导航">
+            ☰
+          </button>
+          <div>
+            <p class="eyebrow" id="breadcrumb">运维中心</p>
+            <h1 id="page-title">服务总览</h1>
+          </div>
+          <div class="top-actions">
+            <span class="session" id="session-label">检查会话中</span
+            ><button class="button secondary" id="logout-button">
+              退出登录
+            </button>
+          </div>
+        </header>
+        <div id="notice" class="notice" hidden role="status"></div>
+        <section id="loading" class="loading">
+          <span class="spinner"></span>
+          <p>正在加载控制台…</p>
+        </section>
+        <section id="login-view" class="auth-card" hidden>
+          <div class="auth-icon">⌁</div>
+          <h2>登录管理控制台</h2>
+          <p>使用部署时设置的管理密码继续。</p>
+          <form id="login-form">
+            <label
+              >管理密码<input
+                id="password"
+                type="password"
+                autocomplete="current-password"
+                required /></label
+            ><button class="button primary" type="submit">安全登录</button>
+          </form>
+        </section>
+        <section id="overview-view" class="view" hidden>
+          <div class="status-row">
+            <div class="service-state">
+              <span id="service-dot" class="dot"></span>
+              <div>
+                <strong id="service-state">连接中</strong>
+                <p id="uptime">等待服务状态</p>
+              </div>
+            </div>
+            <button class="button secondary" id="refresh-button">
+              刷新状态
+            </button>
+          </div>
+          <div class="metric-grid">
+            <article class="metric">
+              <span>账号总数</span><strong id="metric-total">—</strong
+              ><small>已纳入账号池</small>
+            </article>
+            <article class="metric">
+              <span>可用账号</span><strong id="metric-healthy">—</strong
+              ><small>当前可承接请求</small>
+            </article>
+            <article class="metric">
+              <span>冷却中</span><strong id="metric-cooling">—</strong
+              ><small>含限流与熔断</small>
+            </article>
+            <article class="metric">
+              <span>已停用</span><strong id="metric-disabled">—</strong
+              ><small>人工或系统停用</small>
+            </article>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>账号池概况</h2>
+                <p>账号与可用性会每 20 秒更新。</p>
+              </div>
+              <button class="text-button" data-go="accounts">管理账号 →</button>
+            </div>
+            <div id="overview-pool" class="pool-summary"></div>
+          </div>
+        </section>
+        <section id="accounts-view" class="view" hidden>
+          <div class="section-head">
+            <div>
+              <h2>账号管理</h2>
+              <p>凭证仅保留在服务端。积分查询可能需要数秒。</p>
+            </div>
+            <div class="button-group">
+              <button class="button secondary" id="batch-credits">
+                依次刷新积分</button
+              ><button class="button primary" id="oauth-start">
+                添加授权账号
+              </button>
+            </div>
+          </div>
+          <div class="panel table-panel">
+            <div id="accounts-empty" class="empty" hidden>
+              <strong>账号池为空</strong>
+              <p>导入已有账号 JSON，或通过授权添加第一个账号。</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>账号</th>
+                    <th>积分</th>
+                    <th>状态</th>
+                    <th>在途</th>
+                    <th>最近查询</th>
+                    <th aria-label="操作"></th>
+                  </tr>
+                </thead>
+                <tbody id="accounts-body"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>导入账号 JSON</h2>
+                  <p>用于迁移或恢复已有账号。首次使用可直接选择“添加授权账号”，无需准备文件。</p>
+                </div>
+              </div>
+              <details class="import-guide">
+                <summary>从哪里获取账号 JSON？</summary>
+                <ol>
+                  <li><strong>已有 WorkBuddy2API 服务：</strong>从该服务的 <code>auths</code> 目录获取 <code>workbuddy-&lt;uid&gt;.json</code>。若修改过配置，请查看 <code>auth_dir</code> 指定的目录。</li>
+                  <li><strong>通过项目脚本登录：</strong>在已有源码环境中运行 <code>./login.sh</code>，按提示完成浏览器授权，生成的文件位于 <code>auths/workbuddy-&lt;uid&gt;.json</code>。</li>
+                  <li><strong>只有 Docker 容器：</strong>在原服务所在主机执行下方命令，将凭证目录复制出来，再选择对应账号文件。</li>
+                </ol>
+                <pre>docker cp workbuddy2api:/app/auths ./workbuddy-auths</pre>
+                <p>如容器名称或凭证路径已修改，请替换命令中的对应部分。把文件下载到当前电脑后上传，或粘贴文件的完整内容。</p>
+                <p>支持包含 <code>auth</code> / <code>account</code> 的嵌套格式，以及包含 <code>accessToken</code>、<code>uid</code> 的平铺格式。不要上传服务的 <code>config.json</code>。</p>
+                <p class="credential-note">账号文件含访问令牌，请只导入自己的账号，并妥善保管。</p>
+              </details>
+              <label class="file-label"
+                >选择本地 JSON 文件<input
+                  id="import-file"
+                  type="file"
+                  accept="application/json,.json" /></label
+              ><textarea
+                id="import-json"
+                rows="8"
+                spellcheck="false"
+                aria-label="账号 JSON 内容"
+                placeholder="粘贴账号 JSON 内容"
+              ></textarea
+              ><button id="import-button" class="button primary">
+                导入账号
+              </button>
+            </article>
+            <article id="oauth-panel" class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>浏览器授权</h2>
+                  <p>在官方页面登录，完成后账号会自动加入列表。</p>
+                </div>
+              </div>
+              <div id="oauth-idle">
+                <p>当前没有待继续的授权。点击“添加授权账号”获取官方授权链接。</p>
+              </div>
+              <p id="oauth-status" class="oauth-status" role="status" aria-live="polite"></p>
+              <div id="oauth-active" hidden>
+                <p>1. 打开官方授权页面并登录。<br />2. 返回此页等待确认，无需重复添加账号。</p>
+                <a
+                  id="oauth-link"
+                  class="button primary"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >打开授权页面</a
+                >
+                <p class="countdown" id="oauth-countdown"></p>
+                <div class="oauth-actions">
+                <button id="oauth-check" class="button secondary">
+                  我已完成授权，立即检测
+                </button>
+                <button id="oauth-cancel" class="button secondary">
+                  取消授权
+                </button>
+                </div>
+              </div>
+              <p class="oauth-help">同一管理会话内，刷新页面或关闭后返回会恢复授权链接和检测进度。链接 5 分钟内有效；退出登录或服务重启后，请重新开始授权。</p>
+            </article>
+          </div>
+        </section>
+        <section id="config-view" class="view" hidden>
+          <div class="section-head">
+            <div>
+              <h2>服务配置</h2>
+              <p>保存后写入持久化配置；标记为待重启时，重启后才会生效。</p>
+            </div>
+            <button class="button secondary" id="config-reload">
+              重新读取
+            </button>
+          </div>
+          <form id="config-form">
+            <div class="config-grid">
+              <article class="panel">
+                <h2>常用设置</h2>
+                <label
+                  >最大请求体 MB<input
+                    data-config="server.max_body_mb"
+                    type="number"
+                    min="1"
+                    max="1024" /></label
+                ><label
+                  >上游请求超时（秒）<input
+                    data-config="upstream.timeout_seconds"
+                    type="number"
+                    min="1" /></label
+                ><label
+                  >首包等待超时（秒）<input
+                    data-config="upstream.header_timeout_seconds"
+                    type="number"
+                    min="0" /></label
+                ><label
+                  >流空闲超时（秒）<input
+                    data-config="upstream.idle_timeout_seconds"
+                    type="number"
+                    min="0" /></label
+                ><label
+                  >上游 User-Agent<input
+                    data-config="upstream.user_agent"
+                    type="text"
+                    placeholder="留空使用默认值" /></label
+                ><label
+                  >单账号最大在途请求<input
+                    data-config="pool.max_in_flight"
+                    type="number"
+                    min="0" /></label
+                ><label
+                  >会话绑定 TTL<input
+                    data-config="session_sticky.ttl"
+                    type="text" /></label
+                ><label class="check"
+                  ><input
+                    data-config="session_sticky.enabled"
+                    type="checkbox"
+                  />启用会话绑定</label
+                ><label
+                  >提示词模式<select data-config="prompt.mode">
+                    <option value="custom">自定义提示词</option>
+                    <option value="passthrough">透传客户端提示词</option>
+                  </select></label
+                ><div class="config-key-link">
+                  <p>API Key 已独立管理，创建与废弃会立即生效。</p>
+                  <button class="text-button" type="button" data-go="keys">前往 API Key 管理 →</button>
+                </div>
+              </article>
+              <article class="panel">
+                <h2>定时任务</h2>
+                <p>小时使用逗号分隔的 0–23 整数，例如：9, 21。</p>
+                <label class="check"
+                  ><input
+                    data-config="schedule.checkin_enabled"
+                    type="checkbox"
+                  />启用签到</label
+                ><label
+                  >签到小时<input
+                    data-config="schedule.checkin_hours"
+                    data-hours="true"
+                    type="text" /></label
+                ><label class="check"
+                  ><input
+                    data-config="schedule.travel_enabled"
+                    type="checkbox"
+                  />启用旅行</label
+                ><label
+                  >旅行小时<input
+                    data-config="schedule.travel_hours"
+                    data-hours="true"
+                    type="text" /></label
+                ><label class="check"
+                  ><input
+                    data-config="schedule.activity_enabled"
+                    type="checkbox"
+                  />启用活跃上报</label
+                ><label
+                  >活跃上报小时<input
+                    data-config="schedule.activity_hours"
+                    data-hours="true"
+                    type="text" /></label
+                ><label class="check"
+                  ><input
+                    data-config="schedule.keepalive_enabled"
+                    type="checkbox"
+                  />启用令牌保活</label
+                ><label
+                  >令牌保活小时<input
+                    data-config="schedule.keepalive_hours"
+                    data-hours="true"
+                    type="text"
+                /></label>
+              </article>
+              <article class="panel">
+                <h2>运行信息</h2>
+                <dl class="details">
+                  <dt>配置存储</dt>
+                  <dd id="config-storage">—</dd>
+                  <dt>API 密钥</dt>
+                  <dd id="key-state">—</dd>
+                  <dt>服务重启</dt>
+                  <dd id="restart-state">—</dd>
+                  <dt>环境覆盖</dt>
+                  <dd id="env-overrides">—</dd>
+                </dl>
+                <div id="restart-warning" class="callout" hidden>
+                  配置已保存，等待重启生效。
+                </div>
+                <button id="restart-button" class="button danger" type="button">
+                  重启服务
+                </button>
+              </article>
+            </div>
+            <article class="panel advanced">
+              <div class="panel-head">
+                <div>
+                  <h2>高级 JSON</h2>
+                  <p>只提交此处有修改的有效对象；用于未显示的高级配置。</p>
+                </div>
+              </div>
+              <details>
+                <summary>查看当前可编辑配置</summary>
+                <pre id="current-config" class="config-preview"></pre>
+              </details>
+              <textarea
+                id="advanced-json"
+                rows="13"
+                spellcheck="false"
+                placeholder='例如：{ "cooldown": { "soft_rate": "600s" } }'
+              ></textarea>
+              <div class="form-actions">
+                <button class="button primary" type="submit">保存配置</button
+                ><span id="config-status" class="muted"></span>
+              </div>
+            </article>
+          </form>
+        </section>
+        <section id="models-view" class="view" hidden>
+          <div class="section-head">
+            <div>
+              <h2>模型与积分</h2>
+              <p>从指定账号读取上游模型能力与积分倍率，供客户端配置参考。</p>
+            </div>
+            <button class="button secondary" id="models-refresh" type="button">
+              强制刷新
+            </button>
+          </div>
+          <article class="panel models-guide">
+            <div class="models-toolbar">
+              <label>
+                账号
+                <select id="model-account" aria-label="选择查询模型的账号"></select>
+              </label>
+              <label>
+                搜索模型
+                <input id="model-search" type="search" placeholder="按名称或 ID 搜索" autocomplete="off" />
+              </label>
+              <label>
+                倍率排序
+                <select id="model-sort" aria-label="模型倍率排序">
+                  <option value="default">默认顺序</option>
+                  <option value="desc">倍率从高到低</option>
+                  <option value="asc">倍率从低到高</option>
+                </select>
+              </label>
+            </div>
+            <p class="muted">倍率以 ×1.00 为相对基数，不是每次请求的固定扣分。实际消耗还取决于输入 / 输出 Token 和任务复杂度。</p>
+            <div class="model-source" id="model-source" role="status" aria-live="polite">
+              选择账号后读取模型列表。
+            </div>
+          </article>
+          <div class="models-layout">
+            <article class="panel table-panel model-table-panel">
+              <div id="models-empty" class="empty">
+                <strong>暂无模型数据</strong>
+                <p>选择账号后读取上游模型列表。</p>
+              </div>
+              <div class="table-wrap" id="models-table-wrap" hidden>
+                <table class="models-table">
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th>积分倍率</th>
+                      <th>最大输入 / 最大输出</th>
+                      <th>能力</th>
+                      <th>活动标签</th>
+                    </tr>
+                  </thead>
+                  <tbody id="models-body"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="panel model-detail" id="model-detail" hidden>
+              <div class="panel-head">
+                <div>
+                  <h2>客户端配置</h2>
+                  <p>选择模型后显示准确 ID 和可复制的请求示例。</p>
+                </div>
+              </div>
+              <label>
+                当前模型
+                <select id="model-picker" aria-label="选择模型"></select>
+              </label>
+              <div class="model-id-box">
+                <span>准确 model ID</span>
+                <code id="model-id">—</code>
+                <button class="mini-button" id="copy-model-id" type="button">复制模型名</button>
+              </div>
+              <div class="model-facts" id="model-facts"></div>
+              <div class="example-head">
+                <label>
+                  请求示例
+                  <select id="model-example-kind" aria-label="选择请求示例类型">
+                    <option value="responses">Responses API</option>
+                    <option value="chat">Chat Completions API</option>
+                  </select>
+                </label>
+                <button class="mini-button" id="copy-model-example" type="button">复制示例</button>
+              </div>
+              <pre id="model-example" class="model-example"></pre>
+              <p class="model-example-note">示例只用于复制客户端配置，不会发送真实生成请求。API Key 使用 YOUR_API_KEY 占位。</p>
+            </article>
+          </div>
+          <article class="panel credits-note">
+            <h2>积分规则说明</h2>
+            <p>×1.00 表示相对官方积分基准，×0.25 表示相对较低，并不代表每次请求固定扣 0.25 积分。实际消耗还取决于输入/输出 Token 和任务类型，官方没有公布统一的 Token 换算价格。</p>
+            <p>模型倍率缺失时显示“未知”；标记为 auto 的模型显示“动态”；数值 0 会保留，并结合返回的限免等活动标签展示。</p>
+            <div class="link-row">
+              <a href="https://www.codebuddy.cn/docs/ide/Account/credits" target="_blank" rel="noopener noreferrer">官方积分说明 ↗</a>
+              <a href="https://www.codebuddy.cn/docs/workbuddyapp/features/Model" target="_blank" rel="noopener noreferrer">官方模型说明 ↗</a>
+            </div>
+          </article>
+        </section>
+        <section id="keys-view" class="view" hidden>
+          <div class="section-head">
+            <div>
+              <h2>API Key</h2>
+              <p>创建供客户端调用的接入密钥。密钥明文只在创建成功后显示一次。</p>
+            </div>
+            <button class="button secondary" id="keys-refresh" type="button">刷新列表</button>
+          </div>
+          <article class="panel key-status-panel">
+            <div id="key-auth-state" class="key-auth-state" role="status" aria-live="polite">正在读取鉴权状态…</div>
+            <p id="key-auth-help">—</p>
+            <div class="key-limits" id="key-limits"></div>
+          </article>
+          <div class="two-col keys-layout">
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>创建 API Key</h2>
+                  <p>填写用途名称，便于识别和按用途废弃。</p>
+                </div>
+              </div>
+              <form id="key-create-form">
+                <label>
+                  用途名称
+                  <input id="key-name" type="text" maxlength="120" required placeholder="例如：生产客户端" autocomplete="off" />
+                </label>
+                <button class="button primary" id="key-create-button" type="submit">创建密钥</button>
+              </form>
+            </article>
+            <article class="panel">
+              <h2>使用提示</h2>
+              <p>API Key 仅以脱敏前缀出现在列表中。废弃后新请求会立即返回 401，操作不可恢复。</p>
+              <p>匿名访问关闭后不会因为废弃全部密钥而恢复；已有配置密钥在废弃前保持有效。</p>
+            </article>
+          </div>
+          <article class="panel table-panel">
+            <div id="keys-empty" class="empty" hidden>
+              <strong>暂无 API Key</strong>
+              <p>创建第一个密钥后，服务会开启鉴权。</p>
+            </div>
+            <div class="table-wrap" id="keys-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用途</th>
+                    <th>密钥前缀</th>
+                    <th>来源</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th>废弃时间</th>
+                    <th aria-label="操作"></th>
+                  </tr>
+                </thead>
+                <tbody id="keys-body"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+    <dialog
+      id="restart-dialog"
+      class="restart-dialog"
+      aria-labelledby="restart-dialog-title"
+    >
+      <form method="dialog">
+        <h2 id="restart-dialog-title">确认重启服务</h2>
+        <p>
+          重启会中断正在处理的请求。服务恢复后，当前管理会话将失效，需要重新登录。
+        </p>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button
+          ><button id="restart-confirm" class="button danger" value="confirm">
+            确认重启
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="key-secret-dialog" class="key-secret-dialog" aria-labelledby="key-secret-title">
+      <form method="dialog" id="key-secret-form">
+        <h2 id="key-secret-title">API Key 已创建</h2>
+        <p>请立即复制并保存。关闭此窗口后，系统不会再次显示完整密钥。</p>
+        <textarea id="key-secret" rows="3" readonly aria-label="新创建的 API Key"></textarea>
+        <div class="dialog-actions">
+          <button class="button secondary" id="key-secret-copy" type="button">复制密钥</button>
+          <button class="button primary" value="close" type="submit">我已保存，关闭</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="key-revoke-dialog" class="restart-dialog" aria-labelledby="key-revoke-title">
+      <form method="dialog">
+        <h2 id="key-revoke-title">确认废弃 API Key</h2>
+        <p id="key-revoke-message">废弃后，新请求会立即返回 401，且无法恢复。确定继续吗？</p>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button>
+          <button class="button danger" id="key-revoke-confirm" value="confirm">确认废弃</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/admin/app.js" defer></script>
+  </body>
+</html>

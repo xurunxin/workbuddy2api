@@ -976,7 +976,7 @@ func TestSoftRateModelNotPersistedToState(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownSoftForModel("u1", time.Minute, time.Now(), "glm-5.3", "429 rate limit")
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(time.Minute), "glm-5.3", "429 rate limit")
 	p.Flush()
 	raw, err := os.ReadFile(fp)
 	if err != nil {

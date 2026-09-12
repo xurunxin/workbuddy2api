@@ -9,10 +9,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/catalog"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
@@ -21,10 +21,12 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool           *pool.Pool
+	Upstream       *upstream.Client
+	APIKey         string            // 空 = 不鉴权
+	ValidateAPIKey func(string) bool // 非 nil 时作为唯一鉴权来源，支持即时废弃
+	Catalog        *catalog.Service
+	MaxRotate      int // 单请求最多换号次数，默认 3
 	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
 	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
 	MaxBodyBytes int64
@@ -56,9 +58,10 @@ const ServiceName = "workbuddy2api"
 
 // Handler 主路由。
 type Handler struct {
-	cfg     Config
-	mux     *http.ServeMux
-	degrade degradeGate
+	cfg       Config
+	mux       *http.ServeMux
+	degrade   degradeGate
+	responses *responseStore
 }
 
 // NewHandler 构建 handler。
@@ -78,8 +81,14 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = 8 << 20 // 请求体上限兜底 8MB
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	if cfg.Catalog == nil {
+		cfg.Catalog = catalog.New(cfg.Upstream)
+	}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), responses: newResponseStore()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.createResponse))
+	h.mux.HandleFunc("GET /v1/responses/{response_id}", h.withAuth(h.getResponse))
+	h.mux.HandleFunc("DELETE /v1/responses/{response_id}", h.withAuth(h.deleteResponse))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -92,12 +101,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
-			authz := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authz, "Bearer ") || strings.TrimPrefix(authz, "Bearer ") != h.cfg.APIKey {
-				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-				return
-			}
+		authz, key := r.Header.Get("Authorization"), ""
+		if strings.HasPrefix(authz, "Bearer ") {
+			key = strings.TrimPrefix(authz, "Bearer ")
+		}
+		valid := h.cfg.APIKey == "" || key == h.cfg.APIKey
+		if h.cfg.ValidateAPIKey != nil {
+			valid = h.cfg.ValidateAPIKey(key)
+		}
+		if !valid {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
 		}
 		next(w, r)
 	}
@@ -156,85 +170,36 @@ var staticModels = []map[string]any{
 	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 }
 
-// dynamicModelsCache 动态模型缓存。
-var dynamicModelsCache struct {
-	sync.RWMutex
-	ids      []upstream.ModelInfo
-	fetched  time.Time // 最近一次成功拉取时间
-	lastFail time.Time // 最近一次拉取失败时间（负缓存）
-}
-
-const (
-	dynamicModelsTTL        = time.Hour
-	modelsFetchFailCooldown = 5 * time.Minute
-)
-
-// models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
+// models shares the account catalog with administration. The historical static
+// fallback remains available to API clients, explicitly marked and unpriced.
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   h.modelList(),
-	})
-}
-
-// modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
-func (h *Handler) modelList() []map[string]any {
-	if infos := h.fetchDynamicModels(); len(infos) > 0 {
-		out := make([]map[string]any, 0, len(infos))
-		for _, mi := range infos {
-			entry := map[string]any{
-				"id":                mi.ID,
-				"object":            "model",
-				"created":           1753600000,
-				"owned_by":          "workbuddy",
-				"context_length":    mi.ContextWindow,
-				"max_output_tokens": mi.MaxTokens,
+	v, _ := h.cfg.Catalog.Get(r.Context(), h.cfg.Pool.Pick(), false)
+	source := v.Source
+	out := make([]map[string]any, 0, len(v.Models))
+	for _, mi := range v.Models {
+		raw, _ := json.Marshal(mi)
+		var entry map[string]any
+		_ = json.Unmarshal(raw, &entry)
+		entry["object"], entry["created"], entry["owned_by"] = "model", 1753600000, "workbuddy"
+		entry["context_length"] = mi.ContextWindow
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		source = "static"
+		for _, m := range staticModels {
+			entry := make(map[string]any, len(m)+2)
+			for k, value := range m {
+				entry[k] = value
 			}
-			if mi.ContextWindow == 0 {
-				entry["context_length"] = 131072 // 兜底
-			}
+			entry["credit_type"], entry["credit_multiplier"] = "unknown", nil
 			out = append(out, entry)
 		}
-		return out
 	}
-	return staticModels
-}
-
-// fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
-// 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接用静态表，避免反复打上游。
-func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
-		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
-		return out
-	}
-	// 失败负缓存：冷却期内不再请求上游。
-	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
-		dynamicModelsCache.RUnlock()
-		return nil
-	}
-	dynamicModelsCache.RUnlock()
-
-	acct := h.cfg.Pool.Pick()
-	if acct == nil {
-		return nil
-	}
-	infos, err := h.cfg.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
-		// 拉取失败惩罚该账号，避免下次 Pick 又选中同一个反复失败；lastFail 保持全局负缓存。
-		h.cfg.Pool.NoteError(acct.UID)
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
-		return nil
-	}
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = infos
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
-	dynamicModelsCache.Unlock()
-	return infos
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   out, "source": source, "stale": v.Stale || source == "static",
+		"fetched_at": v.FetchedAt,
+	})
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -371,13 +336,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
 			fail(acct.UID)
+			// 客户端断开或调用方主动取消后不再轮转其他账号；同一个
+			// 已取消 context 发起后续请求只会制造无意义的传输错误。
+			if r.Context().Err() != nil {
+				break
+			}
 			continue
 		}
 		if status >= 400 {

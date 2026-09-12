@@ -8,10 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"workbuddy2api/internal/accesskey"
+	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/catalog"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
@@ -131,26 +135,55 @@ func main() {
 		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
 	}
 
+	keys, err := accesskey.Open(filepath.Join(filepath.Dir(cfg.StateFile), "api-keys.json"), cfg.APIKey)
+	if err != nil {
+		log.Fatalf("load API keys: %v", err)
+	}
+	models := catalog.New(up)
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
-		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		Pool:           p,
+		Upstream:       up,
+		APIKey:         cfg.APIKey,
+		ValidateAPIKey: keys.Validate,
+		Catalog:        models,
+		Session:        sessRouter,
+		StickyCount:    sessCount,
+		RedisMode:      redisMode,
+		SoftCooldown:   cfg.SoftRateDur,
+		PromptMode:     cfg.Prompt.Mode,
+		PromptText:     cfg.PromptText,
+		MaxBodyBytes:   int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	manager, err := newConfigManager(cfg)
+	if err != nil {
+		log.Fatalf("load management config: %v", err)
+	}
+	management := admin.New(admin.Config{
+		Password: cfg.Admin.Password, SecureCookie: cfg.Admin.SecureCookie,
+		AuthDir: cfg.AuthDir, Pool: p, Upstream: up,
+		KeyStore: keys, Catalog: models,
+		ReadConfig: manager.read, SaveConfig: manager.save, Restart: stop,
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/admin", management)
+	mux.Handle("/admin/", management)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Service", server.ServiceName)
+		_, _ = w.Write([]byte(`{"service":"workbuddy2api","alive":true}`))
+	})
+	mux.Handle("/", h)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           h,
+		Handler:           mux,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {
@@ -161,7 +194,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
+	log.Printf("workbuddy2api listening on %s (api_key_required=%v)", cfg.Listen, keys.Required())
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

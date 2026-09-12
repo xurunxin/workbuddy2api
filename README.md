@@ -21,7 +21,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为 `/v1/chat/completions` 和 `/v1/responses` 服务，并提供内置 Web 管理控制台。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（`login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -33,6 +33,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 能力 | 说明 |
 |---|---|
+| **Web 管理控制台** | `/admin/`：独立密码登录、OAuth 添加账号、JSON 导入、积分刷新、启停账号、模型与积分倍率、接入 API Key 创建 / 废弃、健康状态、配置保存与服务重启；静态资源嵌入二进制，无需 Node 或独立前端容器 |
+| **Responses API** | 文本 / 图片 URL 输入、函数调用、实时语义 SSE、`previous_response_id` 续接、响应查询与删除；兼容范围见下文 |
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
 | 🔄 **多账号池** | 三因子加权随机选号（积分占比 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
@@ -82,23 +84,95 @@ flowchart LR
 git clone https://github.com/Sliverkiss/workbuddy2api.git
 cd workbuddy2api
 cp config.example.json config.json
+cp .env.example .env
 ```
 
-编辑 `config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
+编辑 `config.json`，将 `api_key` 的 `test_key` 占位符替换为随机密钥（仅首次初始化使用；首次留空且尚未创建密钥时不鉴权）。编辑 `.env`，设置至少 12 位的随机 `WB2A_ADMIN_PASSWORD`；这是独立的管理密码，API 密钥不能用于登录管理台。使用 HTTPS 反向代理时设置 `WB2A_ADMIN_SECURE_COOKIE=true`，代理应保留原始 Host。
 
 ```bash
-# 登录添加账号（重复执行可加多号）
-./login.sh
-
 # 启动服务
 docker compose up -d --build
 
-# 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
+# 进程存活检查（空账号池也返回 200，可以先打开控制台添加账号）
+curl -s http://localhost:7863/livez
+
+# 添加账号后检查 API 就绪状态（无可用账号时 503）
 curl -s http://localhost:7863/healthz
 # {"healthy":2,"total":3,"service":"workbuddy2api"}
 ```
 
-`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + `auths/workbuddy-<uid>.json` 落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
+打开 `http://服务器地址:7863/admin/`，输入管理密码，在「账号管理」中开始 OAuth 授权，并打开授权链接完成 CodeBuddy 登录。浏览器自动轮询结果，凭证仅在服务端保存，账号立即入池，无需重启。也可上传或粘贴现有 `workbuddy-*.json` 文件，再点击「刷新积分」读取当前余额。上游真实授权需要在浏览器中由账号所有者完成。
+
+同一管理会话内刷新或关闭后重新打开页面，会从服务端恢复未完成的授权链接、剩余时间和自动检测；也可点击「我已完成授权，立即检测」。授权链接有效期为 5 分钟，过期后可重新开始。退出登录或服务重启会结束原管理会话，需重新发起授权。
+
+**账号 JSON 来源：**已有服务的 `auth_dir`（默认 `auths`）内保存 `workbuddy-<uid>.json`；项目的 `./login.sh` 完成登录后也会生成此文件。仅有 Docker 部署时，可在原服务主机执行 `docker cp workbuddy2api:/app/auths ./workbuddy-auths` 提取，再将对应文件下载到当前电脑上传；自定义容器名或目录需调整命令。支持 `auth` / `account` 嵌套结构与 `accessToken` / `uid` 平铺结构，服务 `config.json` 不是账号文件。凭证文件包含访问令牌，请妥善保管。首次使用建议直接浏览器授权，无需获取 JSON。
+
+**数据持久化与旧部署升级：**默认 Compose 使用 `auths` / `data` 命名卷，首次启动可直接由非 root 用户写入。已有宿主机 `./auths`、`./data` 的部署请继续使用绑定目录，避免切换卷后看不到旧账号：
+
+```bash
+# Linux 宿主机：确保目录由镜像中的 app 用户（UID 10001）可写
+mkdir -p auths data
+sudo chown -R 10001:10001 auths data
+docker compose -f docker-compose.yml -f docker-compose.bind.yml up -d --build
+```
+
+绑定目录模式可继续使用 `./login.sh`。不要用 `docker compose down -v` 清理需要保留的账号和配置卷。
+
+### Web 管理与配置生效
+
+- 管理入口 `/admin/`，会话有效期 12 小时。服务重启后需要重新登录；未设置管理密码时管理 API 不可使用。
+- 管理台展示账号数量、冷却 / 停用 / 并发状态、积分与查询时间。积分是缓存快照，点击刷新才查询上游；查询失败不会把原余额写为零。健康状态不代表已验证真实模型生成。
+- 可编辑请求大小、上游超时、提示词模式、定时任务、账号池、冷却和会话设置。接入密钥在「API Key」页独立管理，创建和废弃立即生效，无需重启。密码、完整 API 密钥和账号 token 均不从管理查询接口返回。
+- 配置写入 `state_file` 同目录的 `admin-config.json`（默认 `/app/data/admin-config.json`），采用原子写入。基础 `config.json` 可以保持只读挂载。加载顺序为基础配置 → 管理配置 → `WB2A_*` 环境变量；界面会显示环境覆盖项的名称。
+- 保存后点击「重启服务」，Docker 的 `restart: unless-stopped` 会拉起新进程并加载配置。重启会短暂中断服务，超过优雅停机窗口的在途请求会断开；源码直接启动时需手动再次启动进程。
+- `listen`、凭证 / 状态目录、Redis 连接和管理密码属于部署配置，通过文件或环境变量修改。账号可停用或重新启用；重新授权已有账号前，先停用并等待在途请求结束。
+
+### 模型选择与积分倍率
+
+「模型与积分」页按所选账号查询官方已授权的 CLI 模型目录，展示准确的请求 `model` ID、显示名称、积分倍率、输入 / 输出上限、图片 / 工具 / 推理能力和官方标签。可搜索、按倍率排序、选择模型并复制 ID 或 Responses / Chat Completions 请求示例；选择仅用于生成客户端配置，不改变账号池路由或网关默认模型。
+
+目录来自 `/console/enterprises/personal/models` 的 `agents[name=cli].models`，按 ID 关联模型信息并排除已禁用项。缓存按账号隔离，有效期 15 分钟，手动刷新立即查询；失败时保留旧快照并标记过期与查询错误，无快照时明确报错。`/v1/models` 共享此目录，并返回 `credit_multiplier`、`credit_type`、`credits_label` 及 `source` / `stale` 来源信息；该兼容 API 无目录时仍提供标记为 `source: static` 的历史回退列表，其倍率为未知，不能视为当前账号已验证可用。
+
+根据[官方积分规则](https://www.codebuddy.cn/docs/ide/Account/credits)与[WorkBuddy 模型说明](https://www.codebuddy.cn/docs/workbuddyapp/features/Model)，`×1.00` 表示相对消耗基数，`×0.25` 为相对倍率，**不代表每次请求扣 0.25 积分**。实际扣分还取决于输入 / 输出 token、模型定价与任务复杂度；官方未公开统一的 token 到积分换算公式。Auto 为动态选择，缺失倍率显示未知；`×0.00` 与限时优惠标签按上游原样展示，活动可能变化。模型选择和目录刷新不会执行模型生成。
+
+### 接入 API Key 管理
+
+在「API Key」页为客户端创建具名密钥。完整密钥只在创建成功时显示一次，请当场复制；以后仅显示脱敏前缀与状态。客户端用 `Authorization: Bearer <API Key>` 接入。所有密钥具有相同的网关 API 权限，管理台仍使用独立密码。
+
+升级首次启动时，原 `config.json` / 管理覆盖配置 / `WB2A_API_KEY` 最终生效的密钥自动迁移为「原配置密钥」，保持原客户端可用。密钥哈希与废弃状态原子保存到 `state_file` 同目录的 `api-keys.json`（默认 `/app/data/api-keys.json`，文件权限 0600），新密钥完整值不会写入此文件。后续启动以此文件为准，修改旧配置或环境变量不会恢复已经废弃的密钥；旧配置可能仍含迁移前的密钥，需要与数据卷一起妥善保管。
+
+废弃操作不可恢复：该密钥后续请求立即返回 401，已经开始的请求可继续结束。废弃全部密钥也不会恢复匿名访问，仍可用独立管理密码登录并创建新密钥。首次匿名部署创建首个密钥后，同样永久启用鉴权。所有记录（包括已废弃记录）最多 1000 条。升级、重启与备份应保留整个 `data` 卷；损坏的密钥文件会阻止启动，避免悄悄放开鉴权。
+
+### Responses API 使用
+
+以下示例使用网关模型名，`base_url` 仍为服务器的 `/v1`。协议按 [OpenAI Responses 文档](https://developers.openai.com/api/docs/guides/responses)和[流式事件文档](https://developers.openai.com/api/docs/guides/streaming-responses)适配。
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:7863/v1", api_key="your-api-key")
+response = client.responses.create(
+    model="deepseek-v4-flash", input="你好，请介绍一下自己"
+)
+print(response.output_text)
+
+for event in client.responses.create(
+    model="deepseek-v4-flash",
+    previous_response_id=response.id,
+    input="用一句话概括",
+    stream=True,
+):
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
+```
+
+支持字符串 / 消息数组 `input`、`instructions`、`input_text`、图片 URL / Data URI、assistant `output_text`、自定义 `function` 工具及其返回结果（字符串）、`tool_choice`、`reasoning.effort` 和主要生成参数。工具由调用方执行，网关只传递工具调用与结果。`prompt.mode=custom` 会沿用现有规则替换 `instructions`；希望透传时设置 `passthrough`。
+
+兼容 DeepSeek Harness / Pi 等客户端的普通消息与 assistant 历史消息（包括 `input_text` / `output_text`）。以下合法可选偏好会被接受：`reasoning.summary`、`include:["reasoning.encrypted_content"]`、`text.format.type="text"`、`text.verbosity`、`stream_options.include_obfuscation`、`prompt_cache_key` 和 `prompt_cache_retention`。上游未提供对应能力，网关不生成推理摘要、加密推理或混淆数据，也不保证 verbosity 或缓存时长生效；这些字段不会直接透传给 Chat 上游。`reasoning.effort` 仍沿用现有映射与上游降级规则。
+
+流式输出是实时的 `response.created`、`response.output_text.delta`、函数参数增量和终态事件，具有递增 `sequence_number`。默认保存响应；可用 `GET /v1/responses/{id}` 查询，`DELETE /v1/responses/{id}` 删除。`store:false` 不保存。
+
+**兼容范围：**响应保存在单进程内存中，30 分钟过期，最多 1000 条、64 MiB 序列化快照，达到上限会淘汰旧记录；重启或切换实例后不可续接。与输入历史展开后仍受请求大小上限约束。不支持 OpenAI 托管内置工具、后台任务、文件 ID、多模态工具返回、加密推理输入、结构化输出及自动截断；不支持的功能会明确报错，不宣称完整实现全部 OpenAI 功能。Responses 校验错误返回 `X-Request-ID`，服务器日志记录该 ID、HTTP 状态、错误码及已知参数名，不记录请求正文或密钥。
 
 ### 源码构建
 
@@ -106,6 +180,8 @@ curl -s http://localhost:7863/healthz
 go build ./...
 go vet ./...
 go test ./...      # 完整测试套件
+# Docker 内运行 vet 和完整 race 检查（含编译器，无需宿主机配置 CGO）
+docker build --target test .
 go run ./cmd/server -config config.json
 ```
 
@@ -150,6 +226,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `admin.password` | 空 | 独立管理密码，至少 12 位；空 = 禁用管理 API，可由 `WB2A_ADMIN_PASSWORD` 覆盖 |
+| `admin.secure_cookie` | `false` | HTTPS 反向代理部署时启用 Secure cookie，可由 `WB2A_ADMIN_SECURE_COOKIE` 覆盖 |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.max_body_mb` | `8` | 聊天请求体大小上限（MB，0 / 负数启动报错）。超限直接返回 **413 `request_body_too_large`**，不再把半截请求喂给上游 |
@@ -314,11 +392,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式 / 非流式；请求体上限 `server.max_body_mb`（默认 8 MB） |
+| `POST /v1/responses` | 同上 | Responses 文本、函数调用、流式 / 非流式、有限内存续接 |
+| `GET /v1/responses/{id}` / `DELETE /v1/responses/{id}` | 同上 | 查询 / 删除未过期的已保存响应 |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分 / 冷却 / 熔断 / 在途 / 粘性；disabled 账号透出 `disabled_reason`） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `GET /livez` | 无 | 进程存活检查，恒 200，不要求已添加账号；用于容器 HEALTHCHECK |
+| `/admin/` / `/admin/api/*` | 独立管理会话 | 控制台静态登录页公开，管理数据和操作要求密码登录；修改操作校验 CSRF |
 
-> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+> 推理接口和 `/status` 仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；`api_key` 为空时直接放行。管理 API 始终要求独立管理会话，`/healthz`、`/livez` 恒无鉴权。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
@@ -328,7 +410,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
-**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+**宿主健康探测指引**：需要鉴权时用 `/status` + `api_key`；负载均衡器用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 使用 `/livez` 仅检查进程存活，空账号池也能启动控制台；API 流量是否可受理仍以 `/healthz` 为准。
 
 ### 流式行为细节
 
@@ -394,9 +476,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 - **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
 - 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
-- 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
+- 内置 `HEALTHCHECK`（`wget /livez`，30s 间隔）；API 流量路由请检查 `/healthz`
 
-账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
+账号 / 数据通过 `docker-compose.yml` 命名卷 `auths` / `data` 持久化，`./config.json` 只读挂载。已有绑定目录可添加 `docker-compose.bind.yml` 保持原路径。
 
 ### 工具脚本
 
@@ -413,7 +495,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - 多账号复制 `auths/workbuddy-<uid>.json` 即可，池启动时自动对齐目录
 - Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用 `./login.sh` 重新登录覆盖凭证；已持久化 `disabled=true` 的账号可在源码侧调用 `Pool.ReviveDisabled(uid)` 复活（`state.json` 中清除 `disabled` 标志）
-- 备份 = `auths/`（凭证）+ `data/state.json`（池状态：积分 / 冷却 / 计数）；配置 Upstash 后状态另镜像至 Redis（7 天 TTL）
+- 备份 = auths 卷（凭证）+ data 卷（池状态与 `admin-config.json`）+ 基础配置及 `.env`；配置 Upstash 后池状态另镜像至 Redis（7 天 TTL），管理配置仍在本地数据卷
 
 ## 安全与合规
 

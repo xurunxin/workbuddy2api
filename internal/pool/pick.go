@@ -109,6 +109,18 @@ func (p *Pool) pick(tried map[string]bool, reqModel string) *auth.Auth {
 				e = c
 			}
 		}
+		// Coarse clocks can give several concurrent picks identical timestamps.
+		// Break an LRU tie with the existing weighted lottery instead of always
+		// selecting the first UID until the next clock tick.
+		tied := make([]*entry, 0, len(cands))
+		for _, c := range cands {
+			if c.lastUsed.Equal(e.lastUsed) {
+				tied = append(tied, c)
+			}
+		}
+		if len(tied) > 1 {
+			e = p.pickWeighted(tied)
+		}
 	} else {
 		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
 	}

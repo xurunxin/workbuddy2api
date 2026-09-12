@@ -12,6 +12,11 @@ scripts/__pycache__/
 /signin_bin
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json
+.env
+.env.*
+*.key
+*.pem
+*.exe
 PLAN.md
 SPEC.md
 LOOP.md

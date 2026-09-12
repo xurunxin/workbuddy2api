@@ -6,6 +6,7 @@ data/
 *.env
 .env
 .env.*
+!.env.example
 
 # Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
 /login
@@ -18,6 +19,7 @@ config.json
 
 # Build artifacts
 *.tmp
+*.exe
 __pycache__/
 
 # Backups (contains auth tokens)

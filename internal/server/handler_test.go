@@ -834,13 +834,6 @@ func TestModelsEndpoint(t *testing.T) {
 }
 
 func TestModelsDynamic(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
 	// 假上游返回动态模型（含 agents + maxInputTokens/maxOutputTokens）
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, `{"code":0,"data":{"models":[{"id":"dyn-model-a","maxInputTokens":65536,"maxOutputTokens":8192},{"id":"dyn-model-b","maxInputTokens":131072,"maxOutputTokens":16384},{"id":"glm-9.9","maxInputTokens":262144,"maxOutputTokens":32768}],"agents":[{"name":"cli","models":["dyn-model-a","dyn-model-b","glm-9.9"]}]}}`, false
@@ -887,23 +880,15 @@ func TestModelsDynamic(t *testing.T) {
 		}
 	}
 
-	// 第二次调用走缓存（把上游关掉也成功）
-	dynamicModelsCache.RLock()
-	cached := len(dynamicModelsCache.ids)
-	dynamicModelsCache.RUnlock()
-	if cached != 3 {
-		t.Errorf("cache not populated: %d", cached)
+	// 第二次调用从此 handler 的账号缓存读取。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if !strings.Contains(rec.Body.String(), `"source":"cache"`) {
+		t.Fatal("cache not populated")
 	}
 }
 
 func TestModelsDynamicFallsBackToStatic(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
 	// 假上游 500
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `boom`, false
@@ -922,16 +907,12 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	if len(data) < 5 {
 		t.Errorf("static fallback failed: %d", len(data))
 	}
+	if resp["source"] != "static" || resp["stale"] != true {
+		t.Fatal("fallback provenance missing")
+	}
 }
 
-func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
+func TestModelsFetchFailureDoesNotPenalizeAccount(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	p.SetBreaker(1, time.Hour, time.Hour) // 熔断阈值 1：一次 fetch 失败即熔断
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -944,19 +925,12 @@ func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
 		t.Fatalf("code=%d (static fallback)", rec.Code)
 	}
 	st, _ := p.Status("u1")
-	if !st.Cooling {
-		t.Fatalf("fetch failure should trip breaker with threshold=1: %+v", st)
+	if st.Cooling {
+		t.Fatalf("metadata failure must not trip chat breaker: %+v", st)
 	}
 }
 
 func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -978,18 +952,6 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 		t.Errorf("want 1 fetch, got %d", calls)
 	}
 
-	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.lastFail = time.Now().Add(-10 * time.Minute)
-	dynamicModelsCache.Unlock()
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	if rec.Code != 200 {
-		t.Fatalf("after cooldown: code=%d", rec.Code)
-	}
-	if calls != 2 {
-		t.Errorf("want 2 fetch after cooldown, got %d", calls)
-	}
 }
 
 func TestAPIKeyAuth(t *testing.T) {

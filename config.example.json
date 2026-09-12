@@ -1,6 +1,10 @@
 {
   "listen": ":7863",
   "api_key": "test_key",
+  "admin": {
+    "password": "",
+    "secure_cookie": false
+  },
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {

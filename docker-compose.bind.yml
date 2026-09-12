@@ -1,0 +1,7 @@
+# Optional compatibility with existing host directories and login.sh.
+# docker compose -f docker-compose.yml -f docker-compose.bind.yml up -d --build
+services:
+  wb2api:
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data

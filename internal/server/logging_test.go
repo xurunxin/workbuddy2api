@@ -38,7 +38,7 @@ func withChatLog(t *testing.T) {
 }
 
 func TestChatStatsReaderTokensFromUsage(t *testing.T) {
-	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now())
+	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now().Add(-time.Millisecond))
 	if _, err := io.Copy(io.Discard, r); err != nil {
 		t.Fatalf("copy: %v", err)
 	}

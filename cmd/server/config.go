@@ -18,6 +18,10 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	Admin     struct {
+		Password     string `json:"password"`
+		SecureCookie bool   `json:"secure_cookie"`
+	} `json:"admin"`
 
 	Server struct {
 		// MaxBodyMB 聊天请求体大小上限（单位 MB，默认 8）。
@@ -171,6 +175,10 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	applyEnv(c)
+	if err := loadManagedConfig(c); err != nil {
+		return nil, err
+	}
+	applyEnv(c) // Environment remains authoritative over the managed overlay.
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
@@ -178,6 +186,12 @@ func Load(path string) (*Config, error) {
 }
 
 func applyEnv(c *Config) {
+	if v := os.Getenv("WB2A_ADMIN_PASSWORD"); v != "" {
+		c.Admin.Password = v
+	}
+	if v := os.Getenv("WB2A_ADMIN_SECURE_COOKIE"); v != "" {
+		c.Admin.SecureCookie, _ = strconv.ParseBool(v)
+	}
 	if v := os.Getenv("WB2A_LISTEN"); v != "" {
 		c.Listen = v
 	}
@@ -234,6 +248,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if c.Admin.Password != "" && len(c.Admin.Password) < 12 {
+		return fmt.Errorf("admin.password 必须至少 12 位")
+	}
 	// max_body_mb 非法（0/负数）直接报错：0 若被静默当成默认 8MB，用户以为"不限"，
 	// 大请求又被静默 413——不如 fail fast 提示显式配大上限。
 	if c.Server.MaxBodyMB <= 0 {

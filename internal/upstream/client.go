@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -399,14 +401,24 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))）、err 为 nil；
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	return c.ChatStreamContext(context.Background(), a, body)
+}
+
+// ChatStreamContext is ChatStream with caller cancellation propagated through
+// the HTTP request and the returned streaming body. HTTP handlers must use this
+// form so a disconnected client promptly interrupts an upstream SSE read.
+func (c *Client) ChatStreamContext(parent context.Context, a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	url := c.chatBase(a) + "/v2/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
+	ctx, cancel := context.WithCancel(parent)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
 	if err != nil {
+		cancel()
 		return nil, 0, nil, err
 	}
 	c.ChatHeaders(req, a)
-	ctx, cancel := context.WithCancel(context.Background())
-	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
 		cancel()
@@ -430,18 +442,49 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。
 type ModelInfo struct {
-	ID            string
-	Name          string
-	ContextWindow int64    // = maxInputTokens
-	MaxTokens     int64    // = maxOutputTokens
-	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	ContextWindow      int64    `json:"max_input_tokens"`
+	MaxTokens          int64    `json:"max_output_tokens"`
+	Efforts            []string `json:"reasoning_efforts"`
+	CreditsLabel       string   `json:"credits_label"`
+	CreditMultiplier   *float64 `json:"credit_multiplier"`
+	CreditType         string   `json:"credit_type"`
+	Description        string   `json:"description"`
+	SupportsImages     bool     `json:"supports_images"`
+	SupportsToolCall   bool     `json:"supports_tool_call"`
+	SupportsReasoning  bool     `json:"supports_reasoning"`
+	CanDisableThinking bool     `json:"can_disable_thinking"`
+	Tags               []string `json:"tags"`
+}
+
+var creditRatePattern = regexp.MustCompile(`(?i)^[x×]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+credits?)?$`)
+
+// creditRate preserves unknown and zero as distinct values. These are relative
+// model multipliers, never a per-request or per-token credit price.
+func creditRate(id, label string) (*float64, string) {
+	if id == "auto" {
+		return nil, "dynamic"
+	}
+	m := creditRatePattern.FindStringSubmatch(strings.TrimSpace(label))
+	if len(m) == 2 {
+		v, err := strconv.ParseFloat(m[1], 64)
+		if err == nil && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			return &v, "relative"
+		}
+	}
+	return nil, "unknown"
 }
 
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+	return c.FetchModelsContext(context.Background(), a)
+}
+
+func (c *Client) FetchModelsContext(ctx context.Context, a *auth.Auth) ([]ModelInfo, error) {
 	url := c.chatBase(a) + "/console/enterprises/personal/models"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -460,14 +503,23 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		Code int `json:"code"`
 		Data struct {
 			Models []struct {
-				ID              string `json:"id"`
-				Name            string `json:"name"`
-				MaxInputTokens  int64  `json:"maxInputTokens"`
-				MaxOutputTokens int64  `json:"maxOutputTokens"`
-				Disabled        bool   `json:"disabled"`
-				Reasoning       struct {
-					Effort           string   `json:"effort"`
-					SupportedEfforts []string `json:"supportedEfforts"`
+				ID                 string   `json:"id"`
+				Name               string   `json:"name"`
+				MaxInputTokens     int64    `json:"maxInputTokens"`
+				MaxOutputTokens    int64    `json:"maxOutputTokens"`
+				Disabled           bool     `json:"disabled"`
+				Credits            string   `json:"credits"`
+				Description        string   `json:"description"`
+				DescriptionZh      string   `json:"descriptionZh"`
+				SupportsImages     bool     `json:"supportsImages"`
+				SupportsToolCall   bool     `json:"supportsToolCall"`
+				SupportsReasoning  bool     `json:"supportsReasoning"`
+				CanDisableThinking bool     `json:"canDisableThinking"`
+				Tags               []string `json:"tags"`
+				Reasoning          struct {
+					Effort             string   `json:"effort"`
+					SupportedEfforts   []string `json:"supportedEfforts"`
+					CanDisableThinking bool     `json:"canDisableThinking"`
 				} `json:"reasoning"`
 			} `json:"models"`
 			Agents []struct {
@@ -485,44 +537,41 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	var cliIDs []string
 	for _, ag := range env.Data.Agents {
 		if ag.Name == "cli" {
-			cliIDs = ag.Models
-			break
+			cliIDs = append(cliIDs, ag.Models...)
 		}
 	}
 	if len(cliIDs) == 0 {
 		return nil, fmt.Errorf("no cli agent models found")
 	}
-	dynMap := make(map[string]struct {
-		ID              string
-		Name            string
-		MaxInputTokens  int64
-		MaxOutputTokens int64
-		Disabled        bool
-		Efforts         []string
-	}, len(env.Data.Models))
+	dynMap := make(map[string]ModelInfo, len(env.Data.Models))
 	for _, m := range env.Data.Models {
-		dynMap[m.ID] = struct {
-			ID              string
-			Name            string
-			MaxInputTokens  int64
-			MaxOutputTokens int64
-			Disabled        bool
-			Efforts         []string
-		}{m.ID, m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled, m.Reasoning.SupportedEfforts}
-	}
-	out := make([]ModelInfo, 0, len(cliIDs))
-	for _, id := range cliIDs {
-		m, ok := dynMap[id]
-		if !ok || m.Disabled {
+		if m.Disabled || m.ID == "" {
 			continue
 		}
-		out = append(out, ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			ContextWindow: m.MaxInputTokens,
-			MaxTokens:     m.MaxOutputTokens,
-			Efforts:       m.Efforts,
-		})
+		rate, kind := creditRate(m.ID, m.Credits)
+		description := m.DescriptionZh
+		if description == "" {
+			description = m.Description
+		}
+		dynMap[m.ID] = ModelInfo{
+			ID: m.ID, Name: m.Name, ContextWindow: m.MaxInputTokens, MaxTokens: m.MaxOutputTokens,
+			Efforts:      append([]string{}, m.Reasoning.SupportedEfforts...),
+			CreditsLabel: m.Credits, CreditMultiplier: rate, CreditType: kind, Description: description,
+			SupportsImages: m.SupportsImages, SupportsToolCall: m.SupportsToolCall,
+			SupportsReasoning:  m.SupportsReasoning || len(m.Reasoning.SupportedEfforts) > 0 || m.Reasoning.Effort != "",
+			CanDisableThinking: m.CanDisableThinking || m.Reasoning.CanDisableThinking,
+			Tags:               append([]string{}, m.Tags...),
+		}
+	}
+	out := make([]ModelInfo, 0, len(cliIDs))
+	seen := make(map[string]bool, len(cliIDs))
+	for _, id := range cliIDs {
+		m, ok := dynMap[id]
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, m)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")

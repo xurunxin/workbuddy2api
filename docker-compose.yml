@@ -5,9 +5,14 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - WB2A_ADMIN_PASSWORD=${WB2A_ADMIN_PASSWORD:?Set WB2A_ADMIN_PASSWORD in .env (at least 12 characters)}
+      - WB2A_ADMIN_SECURE_COOKIE=${WB2A_ADMIN_SECURE_COOKIE:-false}
     ports:
       - "7863:7863"
     volumes:
-      - ./auths:/app/auths
-      - ./data:/app/data
+      - auths:/app/auths
+      - data:/app/data
       - ./config.json:/app/config.json:ro
+volumes:
+  auths:
+  data:

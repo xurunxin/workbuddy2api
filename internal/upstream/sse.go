@@ -22,7 +22,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		content       strings.Builder
 		reasoning     strings.Builder
 		role          = "assistant"
-		finishReason  = "stop"
+		finishReason  string
 		usage         map[string]any
 		gotAnyContent bool
 		validEvents   int

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -607,7 +608,8 @@ func TestPromptFileOverride(t *testing.T) {
 	want := "我的自定义人格入口"
 	os.WriteFile(pf, []byte(want), 0o600)
 	cf := filepath.Join(dir, "c.json")
-	os.WriteFile(cf, []byte(`{"prompt":{"mode":"custom","file":"`+pf+`"}}`), 0o600)
+	configJSON, _ := json.Marshal(map[string]any{"prompt": map[string]any{"mode": "custom", "file": pf}})
+	os.WriteFile(cf, configJSON, 0o600)
 	c, err := Load(cf)
 	if err != nil {
 		t.Fatal(err)
