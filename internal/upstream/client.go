@@ -590,8 +590,84 @@ func (c *Client) FetchModelsContext(ctx context.Context, a *auth.Auth) ([]ModelI
 	return out, nil
 }
 
-// UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
-func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
+// ResourceUsage is the account's current billing-meter snapshot.
+//
+// Remain is always returned as a non-negative aggregate of the same package
+// branches used by UserResource. Used is nil when the upstream response does
+// not provide enough fields to determine current-cycle usage; nil must not be
+// interpreted as zero usage.
+type ResourceUsage struct {
+	Remain int64
+	Used   *int64
+}
+
+type resourcePackage struct {
+	CapacitySize        *int64 `json:"CapacitySize"`
+	CapacityRemain      *int64 `json:"CapacityRemain"`
+	CapacityUsed        *int64 `json:"CapacityUsed"`
+	CycleCapacitySize   *int64 `json:"CycleCapacitySize"`
+	CycleCapacityRemain *int64 `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   *int64 `json:"CycleCapacityUsed"`
+}
+
+func resourceInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func resourcePositive(v *int64) bool { return v != nil && *v > 0 }
+
+func nonNegativeResource(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// resourceRemain applies the historical balance-selection precedence:
+// current-cycle capacity when present, current-cycle fields when populated,
+// then lifetime/package capacity.
+func resourceRemain(a resourcePackage) int64 {
+	var remain int64
+	switch {
+	case resourcePositive(a.CycleCapacitySize):
+		remain = resourceInt64(a.CycleCapacityRemain)
+	case resourcePositive(a.CycleCapacityRemain) || resourcePositive(a.CycleCapacityUsed):
+		remain = resourceInt64(a.CycleCapacityRemain)
+	default:
+		remain = resourceInt64(a.CapacityRemain)
+	}
+	return nonNegativeResource(remain)
+}
+
+// resourceUsed follows the same branch as resourceRemain. An explicit used
+// field wins; otherwise size-remain is a valid derivation only when both
+// operands are present. Missing both signals leaves usage unknown.
+func resourceUsed(a resourcePackage) (int64, bool) {
+	var used *int64
+	var size, remain *int64
+	switch {
+	case resourcePositive(a.CycleCapacitySize):
+		size, remain, used = a.CycleCapacitySize, a.CycleCapacityRemain, a.CycleCapacityUsed
+	case resourcePositive(a.CycleCapacityRemain) || resourcePositive(a.CycleCapacityUsed):
+		remain, used = a.CycleCapacityRemain, a.CycleCapacityUsed
+	default:
+		size, remain, used = a.CapacitySize, a.CapacityRemain, a.CapacityUsed
+	}
+	if used != nil {
+		return nonNegativeResource(*used), true
+	}
+	if size != nil && remain != nil {
+		return nonNegativeResource(*size - *remain), true
+	}
+	return 0, false
+}
+
+// ResourceUsage queries current package balances and usage from the billing
+// meter. It aggregates all returned packages and preserves unknown usage.
+func (c *Client) ResourceUsage(a *auth.Auth) (usage ResourceUsage, err error) {
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber":               1,
@@ -603,42 +679,42 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	}
 	data, err := c.billingJSON(a, http.MethodPost, billingMeterPath, body)
 	if err != nil {
-		return 0, err
+		return ResourceUsage{}, err
 	}
 	var resp struct {
 		Response struct {
 			Data struct {
-				Accounts []struct {
-					PackageName         string `json:"PackageName"`
-					CapacitySize        int64  `json:"CapacitySize"`
-					CapacityRemain      int64  `json:"CapacityRemain"`
-					CapacityUsed        int64  `json:"CapacityUsed"`
-					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-				} `json:"Accounts"`
+				Accounts []resourcePackage `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("resource parse: %w", err)
+		return ResourceUsage{}, fmt.Errorf("resource parse: %w", err)
 	}
+	used := int64(0)
+	usedKnown := len(resp.Response.Data.Accounts) > 0
 	for _, acct := range resp.Response.Data.Accounts {
-		var r int64
-		switch {
-		case acct.CycleCapacitySize > 0:
-			r = acct.CycleCapacityRemain
-		case acct.CycleCapacityRemain > 0 || acct.CycleCapacityUsed > 0:
-			r = acct.CycleCapacityRemain
-		default:
-			r = acct.CapacityRemain
+		usage.Remain += resourceRemain(acct)
+		if value, ok := resourceUsed(acct); ok {
+			used += value
+		} else {
+			usedKnown = false
 		}
-		if r < 0 {
-			r = 0
-		}
-		remain += r
 	}
-	return remain, nil
+	if usedKnown {
+		usage.Used = &used
+	}
+	return usage, nil
+}
+
+// UserResource preserves the original balance-only API for callers that do
+// not need usage details.
+func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
+	usage, err := c.ResourceUsage(a)
+	if err != nil {
+		return 0, err
+	}
+	return usage.Remain, nil
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。

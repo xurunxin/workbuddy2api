@@ -361,12 +361,53 @@ func TestUserResourceAggregation(t *testing.T) {
 		]}}}}`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	remain, err := c.UserResource(a)
+	usage, err := c.ResourceUsage(a)
 	if err != nil {
 		t.Fatalf("resource: %v", err)
 	}
-	if remain != 1500 {
-		t.Errorf("remain=%d want 1500", remain)
+	if usage.Remain != 1500 {
+		t.Errorf("remain=%d want 1500", usage.Remain)
+	}
+	if usage.Used == nil || *usage.Used != 1500 {
+		t.Errorf("used=%v want 1500", usage.Used)
+	}
+	remain, err := c.UserResource(a)
+	if err != nil || remain != usage.Remain {
+		t.Errorf("compat UserResource remain=%d err=%v want %d", remain, err, usage.Remain)
+	}
+}
+
+func TestResourceUsageUnknownWhenUsedFieldsMissing(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[
+			{"PackageName":"legacy","CapacityRemain":50},
+			{"PackageName":"cycle","CycleCapacitySize":100,"CycleCapacityRemain":60}
+		]}}}}`), nil
+	})
+	usage, err := c.ResourceUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if usage.Remain != 110 {
+		t.Fatalf("remain=%d want 110", usage.Remain)
+	}
+	if usage.Used != nil {
+		t.Fatalf("used=%v want unknown", *usage.Used)
+	}
+}
+
+func TestResourceUsageDerivesUsedFromCurrentCycleSizeAndRemain(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[
+			{"PackageName":"cycle","CycleCapacitySize":100,"CycleCapacityRemain":60}
+		]}}}}`), nil
+	})
+	usage, err := c.ResourceUsage(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if usage.Used == nil || *usage.Used != 40 {
+		t.Fatalf("used=%v want 40", usage.Used)
 	}
 }
 

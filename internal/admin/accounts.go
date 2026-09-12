@@ -118,12 +118,18 @@ func (h *Handler) accountAction(w http.ResponseWriter, r *http.Request) {
 			copy = &auth.Auth{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain, UID: a.UID, EnterpriseID: a.EnterpriseID}
 			a.Unlock()
 		}
-		remain, err := h.cfg.Upstream.UserResource(copy)
+		resource, err := h.cfg.Upstream.ResourceUsage(copy)
 		if err != nil {
 			fail(w, 502, "上游积分查询失败，请稍后重试或重新授权账号")
 			return
 		}
-		h.cfg.Pool.SetCredits(uid, remain)
+		h.cfg.Pool.SetCredits(uid, resource.Remain)
+		if h.cfg.Usage != nil {
+			if err := h.cfg.Usage.SetCredit(uid, resource.Remain, resource.Used); err != nil {
+				fail(w, 500, "积分已查询，但统计保存失败，请检查存储权限")
+				return
+			}
+		}
 		h.mu.Lock()
 		h.creditsChecked[uid] = time.Now()
 		h.mu.Unlock()

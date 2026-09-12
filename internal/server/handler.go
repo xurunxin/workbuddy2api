@@ -18,10 +18,13 @@ import (
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 // Config handler 依赖。
 type Config struct {
+	Usage          *usage.Store
+	IdentifyAPIKey func(string) (string, bool)
 	Pool           *pool.Pool
 	Upstream       *upstream.Client
 	APIKey         string            // 空 = 不鉴权
@@ -107,14 +110,20 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			key = strings.TrimPrefix(authz, "Bearer ")
 		}
 		valid := h.cfg.APIKey == "" || key == h.cfg.APIKey
-		if h.cfg.ValidateAPIKey != nil {
+		keyID := "anonymous"
+		if h.cfg.APIKey != "" {
+			keyID = "legacy"
+		}
+		if h.cfg.IdentifyAPIKey != nil {
+			keyID, valid = h.cfg.IdentifyAPIKey(key)
+		} else if h.cfg.ValidateAPIKey != nil {
 			valid = h.cfg.ValidateAPIKey(key)
 		}
 		if !valid {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		next(w, r)
+		h.trackUsage(w, r, keyID, next)
 	}
 }
 
@@ -378,17 +387,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
+		stats := newChatStatsReaderSince(rc, st.start)
+		defer func() {
+			if u, ok := r.Context().Value(usageContextKey{}).(*requestUsage); ok {
+				u.input, u.output, u.known = stats.input, int64(stats.tokens), stats.hasTokenUsage
+			}
+		}()
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
-			stats := newChatStatsReaderSince(rc, st.start)
-			_ = upstream.Stream(w, stats)
+			if err := upstream.Stream(w, stats); err != nil {
+				if u, ok := r.Context().Value(usageContextKey{}).(*requestUsage); ok {
+					u.failed = true
+				}
+			}
 			st.ttfb = stats.TTFB()
-			st.toks, _ = stats.Tokens()
+			if tokens, ok := stats.Tokens(); ok {
+				st.toks = tokens
+			}
 			rc.Close()
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		resp, err := upstream.Aggregate(stats)
 		rc.Close()
 		if err != nil {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。

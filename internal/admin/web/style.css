@@ -1073,6 +1073,10 @@ textarea::selection {
     padding: 24px;
   }
 }
+.usage-filters { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+.usage-filters label { min-width: 160px; }
+#usage-view > h2, #usage-view > .section-head { margin-top: 24px; }
+#usage-view .metric strong { overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

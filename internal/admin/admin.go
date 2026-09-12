@@ -20,9 +20,11 @@ import (
 	"workbuddy2api/internal/catalog"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 type Config struct {
+	Usage        *usage.Store
 	Password     string
 	SecureCookie bool
 	AuthDir      string
@@ -74,6 +76,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/models", h.authorize(h.accountModels))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/models/refresh", h.authorize(h.accountModels))
 	h.mux.HandleFunc("GET /admin/api/keys", h.authorize(h.listKeys))
+	h.mux.HandleFunc("GET /admin/api/usage", h.authorize(h.usage))
 	h.mux.HandleFunc("POST /admin/api/keys", h.authorize(h.createKey))
 	h.mux.HandleFunc("POST /admin/api/keys/{id}/revoke", h.authorize(h.revokeKey))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/{action}", h.authorize(h.accountAction))

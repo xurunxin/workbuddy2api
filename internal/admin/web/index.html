@@ -19,6 +19,7 @@
           ><button class="nav-item" data-view="accounts">账号管理</button
           ><button class="nav-item" data-view="models">模型与积分</button
           ><button class="nav-item" data-view="keys">API Key</button
+          ><button class="nav-item" data-view="usage">消耗统计</button
           ><button class="nav-item" data-view="config">服务配置</button>
         </nav>
         <div class="sidebar-foot">
@@ -102,6 +103,32 @@
             </div>
             <div id="overview-pool" class="pool-summary"></div>
           </div>
+        </section>
+        <section id="usage-view" class="view" hidden>
+          <div class="section-head">
+            <div><h2>消耗统计</h2><p>请求与 Token 按 UTC 日期统计，自启用日起累计。</p></div>
+            <button class="button secondary" id="usage-refresh">刷新统计</button>
+          </div>
+          <div class="usage-filters">
+            <label>开始日期<input type="date" id="usage-from" /></label>
+            <label>结束日期<input type="date" id="usage-to" /></label>
+          </div>
+          <p id="usage-status" role="status"></p>
+          <div class="metric-grid">
+            <article class="metric"><span>请求数</span><strong id="usage-requests">—</strong></article>
+            <article class="metric"><span>失败请求</span><strong id="usage-failures">—</strong></article>
+            <article class="metric"><span>输入 Token</span><strong id="usage-input">—</strong></article>
+            <article class="metric"><span>输出 Token</span><strong id="usage-output">—</strong></article>
+          </div>
+          <h2>API Key 消耗</h2>
+          <p>上游未提供按 Key 的实扣积分。Token 仅采用上游 usage；缺失用量不计为零消耗。</p>
+          <div class="table-wrap"><table><thead><tr><th>API Key</th><th>状态</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>输出 Token</th><th>缺失用量</th></tr></thead><tbody id="usage-keys"></tbody></table></div>
+          <h2>每日用量</h2>
+          <div class="table-wrap"><table><thead><tr><th>日期（UTC）</th><th>请求数</th><th>失败</th><th>输入 Token</th><th>输出 Token</th><th>缺失用量</th></tr></thead><tbody id="usage-days"></tbody></table></div>
+          <div class="section-head"><h2>账户积分</h2><button class="button secondary" id="usage-credits-refresh">刷新账户积分</button></div>
+          <p>当前有效套餐的已用积分与余额快照，包含其他客户端使用量，不受上方日期筛选影响。</p>
+          <p id="usage-credit-total"></p>
+          <div class="table-wrap"><table><thead><tr><th>账户</th><th>已用积分</th><th>剩余积分</th><th>查询时间</th></tr></thead><tbody id="usage-credits"></tbody></table></div>
         </section>
         <section id="accounts-view" class="view" hidden>
           <div class="section-head">

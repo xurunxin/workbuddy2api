@@ -39,13 +39,14 @@
     sessionEpoch: 0,
     copyFallback: null,
   };
-  const views = ["overview", "accounts", "models", "keys", "config"];
+  const views = ["overview", "accounts", "models", "keys", "usage", "config"];
   const titles = {
     overview: "服务总览",
     accounts: "账号管理",
     models: "模型与积分",
     keys: "API Key",
     config: "服务配置",
+    usage: "消耗统计",
   };
   function notice(message, error = false) {
     const el = $("notice");
@@ -136,7 +137,58 @@
       if (uid) loadModels(uid);
     }
     if (view === "keys" && !state.keys.loaded) loadKeys();
+    if (view === "usage") loadUsage();
   }
+  let usageRequest = 0;
+  async function loadUsage() {
+    const request = ++usageRequest, epoch = state.sessionEpoch;
+    $("usage-status").textContent = "正在加载…";
+    try {
+      const query = new URLSearchParams({from: $("usage-from").value, to: $("usage-to").value});
+      const [data, keys] = await Promise.all([api(`usage?${query}`), api("keys")]);
+      if (request !== usageRequest || epoch !== state.sessionEpoch) return;
+      const zero = () => ({requests: 0, failures: 0, input_tokens: 0, output_tokens: 0, missing_usage: 0});
+      const sum = (a, b) => Object.keys(a).forEach(k => { a[k] += Number(b[k]) || 0; });
+      const total = zero(), byKey = new Map(), byDay = new Map();
+      (keys.keys || []).forEach(k => byKey.set(k.id, {key: k, totals: zero()}));
+      data.rows.forEach(row => {
+        sum(total, row);
+        if (!byKey.has(row.key_id)) byKey.set(row.key_id, {key: {name: row.key_id === "anonymous" ? "匿名访问" : row.key_id, status: "unknown"}, totals: zero()});
+        sum(byKey.get(row.key_id).totals, row);
+        if (!byDay.has(row.day)) byDay.set(row.day, zero());
+        sum(byDay.get(row.day), row);
+      });
+      [["requests", "requests"], ["failures", "failures"], ["input", "input_tokens"], ["output", "output_tokens"]].forEach(([id, key]) => { $(`usage-${id}`).textContent = total[key].toLocaleString(); });
+      const cells = (body, values) => { const tr = node("tr"); values.forEach(v => tr.append(node("td", typeof v === "number" ? v.toLocaleString() : v))); body.append(tr); };
+      const values = t => [t.requests, t.failures, t.input_tokens, t.output_tokens, t.missing_usage];
+      const keyBody = $("usage-keys"), dayBody = $("usage-days"), creditBody = $("usage-credits");
+      [keyBody, dayBody, creditBody].forEach(clearChildren);
+      [...byKey.values()].sort((a,b) => b.totals.requests-a.totals.requests).forEach(({key, totals}) => cells(keyBody, [key.name + (key.prefix ? ` (${key.prefix})` : ""), key.status === "active" ? "启用" : key.status === "revoked" ? "已废弃" : "—", ...values(totals)]));
+      [...byDay.entries()].reverse().forEach(([day, totals]) => cells(dayBody, [day, ...values(totals)]));
+      (data.credits || []).forEach(c => cells(creditBody, [c.uid, c.used ?? "未知", c.remain, fmtTime(c.checked_at)]));
+      const credits = data.credits || [];
+      const knownCredits = credits.filter(c => c.used !== null && c.used !== undefined);
+      $("usage-credit-total").textContent = credits.length ? `已查询 ${credits.length} 个账户 · 已知已用积分 ${knownCredits.reduce((n,c) => n + c.used, 0).toLocaleString()} · 剩余积分 ${credits.reduce((n,c) => n + c.remain, 0).toLocaleString()}${knownCredits.length < credits.length ? ` · ${credits.length - knownCredits.length} 个账户已用积分未知` : ""}` : "";
+      if (!byKey.size) cells(keyBody, ["暂无 API Key 用量"]);
+      if (!byDay.size) cells(dayBody, ["所选日期暂无请求"]);
+      if (!(data.credits || []).length) cells(creditBody, ["尚未查询账户积分"]);
+      $("usage-status").textContent = data.persistence_error ? "统计尚未成功落盘，重启可能丢失部分数据，请检查存储权限。" : `缺失用量的请求：${total.missing_usage.toLocaleString()}`;
+    } catch (err) { if (request === usageRequest && epoch === state.sessionEpoch) $("usage-status").textContent = err.message; }
+  }
+  $("usage-refresh").addEventListener("click", loadUsage);
+  ["usage-from", "usage-to"].forEach(id => $(id).addEventListener("change", loadUsage));
+  $("usage-credits-refresh").addEventListener("click", async () => {
+    const button = $("usage-credits-refresh"); button.disabled = true;
+    let failed = 0;
+    try {
+      const status = await api("status");
+      for (const account of status.accounts || []) {
+        if (!state.csrf) break;
+        try { await api(`accounts/${encodeURIComponent(account.uid)}/credits`, {method: "POST"}); } catch (_) { failed++; }
+      }
+      if (state.csrf) { await loadUsage(); if (failed) notice(`${failed} 个账户积分查询失败`, true); }
+    } catch (err) { notice(err.message, true); } finally { button.disabled = false; }
+  });
   function showLogin(message) {
     clearInterval(state.timer);
     stopOAuth();
@@ -238,7 +290,7 @@
     const body = $("accounts-body");
     clearChildren(body);
     $("accounts-empty").hidden = accounts.length !== 0;
-    document.querySelector(".table-wrap").hidden = accounts.length === 0;
+    document.querySelector("#accounts-view .table-wrap").hidden = accounts.length === 0;
     accounts.forEach((a) => {
       const tr = document.createElement("tr");
       const who = node("td");

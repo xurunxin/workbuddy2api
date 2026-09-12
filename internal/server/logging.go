@@ -54,13 +54,15 @@ func (s *chatStat) done() {
 // 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
-	br       *bufio.Reader
-	start    time.Time
-	ttfb     time.Duration
-	seen     bool // 已见过首个 data 帧（TTFB 只记一次）
-	hasUsage bool // 末帧是否带 usage
-	tokens   int
-	pend     []byte // 已读未返回的行缓存
+	input         int64
+	hasTokenUsage bool
+	br            *bufio.Reader
+	start         time.Time
+	ttfb          time.Duration
+	seen          bool // 已见过首个 data 帧（TTFB 只记一次）
+	hasUsage      bool // 末帧是否带 usage
+	tokens        int
+	pend          []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -77,10 +79,10 @@ func (s *chatStatsReader) Tokens() (int, bool) { return s.tokens, s.hasUsage }
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
 func (s *chatStatsReader) parseSSELine(line string) {
 	line = strings.TrimRight(line, "\r\n")
-	if !strings.HasPrefix(line, "data: ") {
+	if !strings.HasPrefix(line, "data:") {
 		return
 	}
-	payload := strings.TrimPrefix(line, "data: ")
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 	if payload == "[DONE]" {
 		return
 	}
@@ -90,14 +92,21 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	var chunk struct {
 		Usage *struct {
-			CompletionTokens int `json:"completion_tokens"`
+			CompletionTokens *int   `json:"completion_tokens"`
+			PromptTokens     *int64 `json:"prompt_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
 		return
 	}
-	s.hasUsage = true
-	s.tokens = chunk.Usage.CompletionTokens
+	if chunk.Usage.CompletionTokens != nil && *chunk.Usage.CompletionTokens >= 0 {
+		s.hasUsage = true
+		s.tokens = *chunk.Usage.CompletionTokens
+	}
+	if chunk.Usage.PromptTokens != nil && *chunk.Usage.PromptTokens >= 0 && s.hasUsage {
+		s.input = *chunk.Usage.PromptTokens
+		s.hasTokenUsage = true
+	}
 }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。

@@ -22,6 +22,7 @@ import (
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/usage"
 )
 
 func main() {
@@ -141,11 +142,17 @@ func main() {
 		log.Fatalf("load API keys: %v", err)
 	}
 	models := catalog.New(up)
+	usageStore, err := usage.Open(filepath.Join(filepath.Dir(cfg.StateFile), "usage.json"))
+	if err != nil {
+		log.Fatalf("load usage statistics: %v", err)
+	}
 	h := server.NewHandler(server.Config{
 		Pool:           p,
 		Upstream:       up,
 		APIKey:         cfg.APIKey,
 		ValidateAPIKey: keys.Validate,
+		IdentifyAPIKey: keys.Identify,
+		Usage:          usageStore,
 		Catalog:        models,
 		Session:        sessRouter,
 		StickyCount:    sessCount,
@@ -167,6 +174,7 @@ func main() {
 		Password: cfg.Admin.Password, SecureCookie: cfg.Admin.SecureCookie,
 		AuthDir: cfg.AuthDir, Pool: p, Upstream: up,
 		KeyStore: keys, Catalog: models,
+		Usage:      usageStore,
 		ReadConfig: manager.read, SaveConfig: manager.save, Restart: stop,
 	})
 	mux := http.NewServeMux()

@@ -135,21 +135,32 @@ func (s *Store) Required() bool {
 // anonymous compatibility state. Once authentication is enabled it compares
 // SHA-256 values in constant time and accepts active keys only.
 func (s *Store) Validate(key string) bool {
+	_, valid := s.Identify(key)
+	return valid
+}
+
+// Identify returns a safe durable ID along with the authentication decision.
+func (s *Store) Identify(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if !s.data.AuthenticationRequired {
-		return true
+		return "anonymous", true
 	}
 	sum := sha256.Sum256([]byte(key))
 	encoded := hex.EncodeToString(sum[:])
 	valid := 0
+	id := ""
 	for _, item := range s.data.Keys {
 		if item.RevokedAt == nil {
-			valid |= subtle.ConstantTimeCompare([]byte(encoded), []byte(item.Hash))
+			match := subtle.ConstantTimeCompare([]byte(encoded), []byte(item.Hash))
+			valid |= match
+			if match == 1 {
+				id = item.ID
+			}
 		}
 	}
-	return valid == 1
+	return id, valid == 1
 }
 
 // Create generates a new API key. The plaintext result is returned only from
