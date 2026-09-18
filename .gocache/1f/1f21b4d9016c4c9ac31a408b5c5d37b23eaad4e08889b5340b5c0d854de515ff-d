@@ -1,5 +1,0 @@
-./logfmt.go
-./label_test.go
-./logfmt_test.go
-./truncate_contract_test.go
-./truncate_test.go

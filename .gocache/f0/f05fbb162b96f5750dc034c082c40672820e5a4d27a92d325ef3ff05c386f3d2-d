@@ -1,5 +1,0 @@
-./main.go
-./dojson_read_error_test.go
-./endpoint_test.go
-./flow_test.go
-./realm_test.go
