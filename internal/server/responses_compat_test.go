@@ -127,7 +127,7 @@ func TestResponsesOptionalPreferencesAcceptedAndNotForwarded(t *testing.T) {
 			if outbound == nil {
 				t.Fatal("upstream was not called")
 			}
-			for _, key := range []string{"include", "stream_options", "reasoning", "text", "prompt_cache_key", "prompt_cache_retention"} {
+			for _, key := range []string{"include", "reasoning", "text", "prompt_cache_retention"} {
 				if _, ok := outbound[key]; ok {
 					t.Errorf("Responses option %q was forwarded upstream: %v", key, outbound)
 				}
@@ -168,7 +168,7 @@ func TestResponsesOptionalPreferencesCombinedStreamStoreFalse(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "event: response.completed\n") {
 		t.Fatalf("stream did not complete: %s", rec.Body)
 	}
-	for _, key := range []string{"include", "stream_options", "reasoning", "text", "prompt_cache_key", "prompt_cache_retention"} {
+	for _, key := range []string{"include", "reasoning", "text", "prompt_cache_retention"} {
 		if _, ok := outbound[key]; ok {
 			t.Errorf("Responses option %q was forwarded upstream: %v", key, outbound)
 		}

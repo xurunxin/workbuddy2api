@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +76,9 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if c.Pool.MaxInFlight != 3 {
 		t.Errorf("max_in_flight=%d want 3", c.Pool.MaxInFlight)
 	}
+	if c.Pool.MaxInFlightGlobal != 2 {
+		t.Errorf("max_in_flight_global=%d want 2 (WAF P1-1 global 档默认)", c.Pool.MaxInFlightGlobal)
+	}
 	if c.Pool.BreakerThreshold != 3 {
 		t.Errorf("breaker_threshold=%d want 3", c.Pool.BreakerThreshold)
 	}
@@ -110,6 +112,7 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 		"upstash":{"url":"https://foo.upstash.io","token":"tok"},
 		"pool":{
 			"max_in_flight":5,
+			"max_in_flight_global":4,
 			"breaker_threshold":4,
 			"breaker_cooldown":"10m",
 			"breaker_cooldown_max":"2h",
@@ -127,6 +130,9 @@ func TestPoolConfigParsedFromFile(t *testing.T) {
 	}
 	if c.Pool.MaxInFlight != 5 || c.Pool.BreakerThreshold != 4 {
 		t.Errorf("pool=%+v", c.Pool)
+	}
+	if c.Pool.MaxInFlightGlobal != 4 {
+		t.Errorf("max_in_flight_global=%d want 4 (config 覆盖默认)", c.Pool.MaxInFlightGlobal)
 	}
 	if c.BreakerCooldownDur.Minutes() != 10 || c.BreakerCooldownMaxD.Hours() != 2 {
 		t.Errorf("breaker durations=%v/%v", c.BreakerCooldownDur, c.BreakerCooldownMaxD)
@@ -290,6 +296,16 @@ func TestScheduleEnabledByDefault(t *testing.T) {
 	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", c.Schedule.ActivityHours)
 	}
+	if len(c.Schedule.SchoolHours) != 1 || c.Schedule.SchoolHours[0] != 12 {
+		t.Errorf("school_hours=%v want [12]", c.Schedule.SchoolHours)
+	}
+	if len(c.Schedule.CatHours) != 1 || c.Schedule.CatHours[0] != 1 {
+		t.Errorf("cat_hours=%v want [1]", c.Schedule.CatHours)
+	}
+	if !c.Schedule.SchoolEnabled || !c.Schedule.CatEnabled {
+		t.Errorf("school/cat enabled defaults want true/true, got %v/%v",
+			c.Schedule.SchoolEnabled, c.Schedule.CatEnabled)
+	}
 }
 
 // TestScheduleLegacyConfigKeepsRunning 老 config（只写签到/保活小时数组，无新键）加载后仍是启用态，
@@ -317,6 +333,15 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	}
 	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want default [10]", c.Schedule.ActivityHours)
+	}
+	if len(c.Schedule.SchoolHours) != 1 || c.Schedule.SchoolHours[0] != 12 {
+		t.Errorf("school_hours=%v want default [12]", c.Schedule.SchoolHours)
+	}
+	if len(c.Schedule.CatHours) != 1 || c.Schedule.CatHours[0] != 1 {
+		t.Errorf("cat_hours=%v want default [1]", c.Schedule.CatHours)
+	}
+	if !c.Schedule.SchoolEnabled || !c.Schedule.CatEnabled {
+		t.Errorf("school/cat switches must default true on legacy config: %+v", c.Schedule)
 	}
 }
 
@@ -493,14 +518,14 @@ func TestBadSessionTTL(t *testing.T) {
 	}
 }
 
-// TestMaxBodyDefault 默认 max_body_mb=8。
+// TestMaxBodyDefault 默认 max_body_mb=20。
 func TestMaxBodyDefault(t *testing.T) {
-	c := Default()
-	if err := c.normalize(); err != nil {
-		t.Fatalf("normalize: %v", err)
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if c.Server.MaxBodyMB != 8 {
-		t.Errorf("max_body_mb=%d want 8", c.Server.MaxBodyMB)
+	if c.Server.MaxBodyMB != 20 {
+		t.Errorf("max_body_mb=%d want 20", c.Server.MaxBodyMB)
 	}
 }
 
@@ -518,8 +543,8 @@ func TestMaxBodyExplicit(t *testing.T) {
 	}
 }
 
-// TestMaxBodyInvalid 非法值（0/负数）normalize 报错：0 想表达"不限"会被静默当成 8MB，
-// 与其误导不如 fail fast 提示显式配大上限。
+// TestMaxBodyInvalid 非法值（0/负数）normalize 报错：0 想表达"不限"会被静默当成 20MB，
+// 大请求又被 413——fail fast 指向显式配大上限。
 func TestMaxBodyInvalid(t *testing.T) {
 	for _, v := range []string{"0", "-1"} {
 		dir := t.TempDir()
@@ -537,10 +562,10 @@ func TestMaxBodyInvalid(t *testing.T) {
 
 // TestMaxBodyEnvOverride env WB2A_MAX_BODY_MB 非空覆盖 JSON 值。
 func TestMaxBodyEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_MAX_BODY_MB", "12")
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"server":{"max_body_mb":4}}`), 0o600)
-	t.Setenv("WB2A_MAX_BODY_MB", "12")
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
@@ -550,17 +575,17 @@ func TestMaxBodyEnvOverride(t *testing.T) {
 	}
 }
 
-// TestPromptDefaultCustom 默认 prompt.mode=custom 且 PromptText 为内置默认（非空）。
-func TestPromptDefaultCustom(t *testing.T) {
+// TestPromptDefaultMode 默认 prompt.mode=passthrough 且不加载 PromptText（透传客户端原始 system）。
+func TestPromptDefaultMode(t *testing.T) {
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "custom" {
-		t.Errorf("prompt.mode=%q want custom", c.Prompt.Mode)
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("prompt.mode=%q want passthrough", c.Prompt.Mode)
 	}
-	if c.PromptText == "" {
-		t.Error("PromptText should be non-empty (built-in default)")
+	if c.PromptText != "" {
+		t.Errorf("default passthrough should not load PromptText, got len=%d", len(c.PromptText))
 	}
 }
 
@@ -608,8 +633,9 @@ func TestPromptFileOverride(t *testing.T) {
 	want := "我的自定义人格入口"
 	os.WriteFile(pf, []byte(want), 0o600)
 	cf := filepath.Join(dir, "c.json")
-	configJSON, _ := json.Marshal(map[string]any{"prompt": map[string]any{"mode": "custom", "file": pf}})
-	os.WriteFile(cf, configJSON, 0o600)
+	// 路径写进 JSON 字符串需转义反斜杠：Windows 下 filepath.Join 生成 C:\Users\...，
+	// 原样拼接会让 \U 成为非法 JSON 转义。ToSlash 统一为正斜杠（跨平台可解析）。
+	os.WriteFile(cf, []byte(`{"prompt":{"mode":"custom","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
 	c, err := Load(cf)
 	if err != nil {
 		t.Fatal(err)
@@ -631,7 +657,7 @@ func TestPromptEnvOverride(t *testing.T) {
 	}
 }
 
-// TestPromptLegacyConfigNoImpact 旧 config（无 prompt 段）零影响：mode 仍 custom。
+// TestPromptLegacyConfigNoImpact 旧 config（无 prompt 段）零影响：mode 走缺省 passthrough。
 func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -640,11 +666,40 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "custom" {
-		t.Errorf("legacy config should default to custom, got %q", c.Prompt.Mode)
+	if c.Prompt.Mode != "passthrough" {
+		t.Errorf("legacy config should default to passthrough, got %q", c.Prompt.Mode)
 	}
 	if c.Listen != ":9999" {
 		t.Errorf("listen=%q", c.Listen)
+	}
+}
+
+// TestUpstreamVersionConfig 配置 upstream.client_version / cli_version 与 env
+// WB2A_CLIENT_VERSION / WB2A_CLI_VERSION 均生效；缺省空串 = headers 层回落内置默认。
+func TestUpstreamVersionConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"client_version":"6.0.0","cli_version":"3.0.0"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.ClientVersion != "6.0.0" || c.Upstream.CliVersion != "3.0.0" {
+		t.Errorf("client_version=%q cli_version=%q want 6.0.0/3.0.0", c.Upstream.ClientVersion, c.Upstream.CliVersion)
+	}
+	// 缺省为空（headers 层回落内置默认）。
+	if c2, err := Load(""); err != nil || c2.Upstream.ClientVersion != "" || c2.Upstream.CliVersion != "" {
+		t.Errorf("default versions=%q/%q want empty (err=%v)", c2.Upstream.ClientVersion, c2.Upstream.CliVersion, err)
+	}
+	// env 覆盖。
+	t.Setenv("WB2A_CLIENT_VERSION", "7.0.0")
+	t.Setenv("WB2A_CLI_VERSION", "4.0.0")
+	c3, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Upstream.ClientVersion != "7.0.0" || c3.Upstream.CliVersion != "4.0.0" {
+		t.Errorf("env versions=%q/%q want 7.0.0/4.0.0", c3.Upstream.ClientVersion, c3.Upstream.CliVersion)
 	}
 }
 
@@ -674,5 +729,66 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 	}
 	if c3.Upstream.UserAgent != "EnvAgent/9" {
 		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
+	}
+}
+
+// ---- prompt.mode=append（issue #129 三模式） ----
+
+// TestPromptAppendModeAccepted B1：append 新值合法，PromptText 非空（内置默认，
+// 与 custom 同加载路径）。
+func TestPromptAppendModeAccepted(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"append"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Prompt.Mode != "append" {
+		t.Errorf("mode=%q want append", c.Prompt.Mode)
+	}
+	if c.PromptText == "" {
+		t.Error("append should load PromptText (built-in default)")
+	}
+}
+
+// TestPromptAppendFileOverride B2：append + file → PromptText 为文件内容。
+func TestPromptAppendFileOverride(t *testing.T) {
+	dir := t.TempDir()
+	pf := filepath.Join(dir, "my.md")
+	want := "我的 append 模式人格"
+	os.WriteFile(pf, []byte(want), 0o600)
+	cf := filepath.Join(dir, "c.json")
+	os.WriteFile(cf, []byte(`{"prompt":{"mode":"append","file":"`+filepath.ToSlash(pf)+`"}}`), 0o600)
+	c, err := Load(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PromptText != want {
+		t.Errorf("PromptText=%q want %q", c.PromptText, want)
+	}
+}
+
+// TestPromptAppendFileMissingFailsFast B3：append + 不可读 file → 启动报错（同 custom）。
+func TestPromptAppendFileMissingFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"append","file":"/nonexistent/p.md"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for missing prompt file in append mode")
+	}
+}
+
+// TestPromptInvalidModeStillErrors B4：非法值报错文案含三值说明。
+func TestPromptInvalidModeStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"replace"}}`), 0o600)
+	_, err := Load(fp)
+	if err == nil {
+		t.Fatal("want error for invalid prompt.mode")
+	}
+	if !strings.Contains(err.Error(), "custom / append / passthrough") {
+		t.Errorf("error should mention (custom / append / passthrough): %v", err)
 	}
 }

@@ -20,6 +20,23 @@ func catalogClient(server *httptest.Server) *upstream.Client {
 	return &upstream.Client{HTTP: server.Client(), ChatBaseCN: server.URL, BillingBaseCN: server.URL}
 }
 
+// catalogServe 是测试假上游的统一入口：/v3/config 返回 404（catalog 只走企业端点
+// 单路探测；v3-merge 后 FetchModels 会并发打 /v3/config，这里排除其干扰计数）。
+// catalogServed 报告该请求是否属于企业端点（/v3/config 探测直接 404 且不计入）。
+func catalogServed(w http.ResponseWriter, r *http.Request) bool {
+	if strings.HasSuffix(r.URL.Path, "/v3/config") {
+		http.NotFound(w, r)
+		return false
+	}
+	return true
+}
+func catalogServe(w http.ResponseWriter, r *http.Request, body string) {
+	if !catalogServed(w, r) {
+		return
+	}
+	_, _ = w.Write([]byte(body))
+}
+
 func catalogModels(id string) string {
 	return `{"code":0,"data":{"models":[{"id":"` + id + `","name":"` + id + `","credits":"x0.25","tags":["original"]}],"agents":[{"name":"cli","models":["` + id + `"]}]}}`
 }
@@ -29,10 +46,12 @@ func TestServiceSeparatesAccountsInvalidatesPointerAndClonesCache(t *testing.T) 
 	calls := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		mu.Lock()
-		calls[token]++
-		mu.Unlock()
-		_, _ = w.Write([]byte(catalogModels("model-" + token)))
+		if catalogServed(w, r) {
+			mu.Lock()
+			calls[token]++
+			mu.Unlock()
+			_, _ = w.Write([]byte(catalogModels("model-" + token)))
+		}
 	}))
 	defer server.Close()
 
@@ -80,6 +99,9 @@ func TestServiceTTLForceStaleFailureNegativeCacheAndRecovery(t *testing.T) {
 	var fail atomic.Bool
 	const upstreamBody = "sensitive-upstream-body"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !catalogServed(w, r) {
+			return
+		}
 		calls.Add(1)
 		if fail.Load() {
 			http.Error(w, upstreamBody, http.StatusBadGateway)
@@ -131,12 +153,15 @@ func TestServiceNoCacheFailureHasNegativeCacheAndCanRecover(t *testing.T) {
 	var healthy atomic.Bool
 	const body = "failure-body-must-not-escape"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !catalogServed(w, r) {
+			return
+		}
 		calls.Add(1)
 		if !healthy.Load() {
 			http.Error(w, body, http.StatusServiceUnavailable)
 			return
 		}
-		_, _ = w.Write([]byte(catalogModels("recovered")))
+		catalogServe(w, r, catalogModels("recovered"))
 	}))
 	defer server.Close()
 	svc := New(catalogClient(server))
@@ -163,13 +188,16 @@ func TestServiceConcurrentGetFetchesOncePerAccount(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !catalogServed(w, r) {
+			return
+		}
 		calls.Add(1)
 		select {
 		case started <- struct{}{}:
 		default:
 		}
 		<-release
-		_, _ = w.Write([]byte(catalogModels(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))))
+		catalogServe(w, r, catalogModels(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")))
 	}))
 	defer server.Close()
 	svc := New(catalogClient(server))
@@ -217,7 +245,7 @@ func TestServiceRefreshesExpiredTokenAndPersistsBeforeFetchingModels(t *testing.
 			if r.Header.Get("Authorization") != "Bearer new-access" {
 				t.Errorf("models Authorization = %q", r.Header.Get("Authorization"))
 			}
-			_, _ = w.Write([]byte(catalogModels("after-refresh")))
+			catalogServe(w, r, catalogModels("after-refresh"))
 		default:
 			http.NotFound(w, r)
 		}

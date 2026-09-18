@@ -1,0 +1,3 @@
+./redisstore.go
+./close_test.go
+./redisstore_test.go

@@ -31,6 +31,14 @@ type Config struct {
 	GCInterval time.Duration
 	Store      redisstore.Store
 	Available  func() []string
+	// AvailableForModel 按请求模型返回"在该模型上可用"的账号
+	// （healthy 且未占满在途，且未被该模型限流/限额）。nil 时回落 Available
+	// （无模型维度，行为与引入前一致）。
+	//
+	// 为什么粘性需要模型维度：绑定只记 uid，而同一个会话可能换模型。账号被 6004
+	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
+	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
+	AvailableForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -57,13 +65,21 @@ func New(cfg Config) *Router {
 }
 
 // StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
+//
+// stop channel 必须在启 goroutine 前捕获到**局部变量**：goroutine 在 select 里
+// 每轮重新求值 r.stop 是无锁读，而 StopGC 持写锁把它置 nil——既是数据竞争
+// （-race 可复现），又会在读到 nil 后让该 case 永久阻塞（nil channel 永不就绪），
+// 于是关停彻底失效：goroutine 再也不会退出，ticker 无限触发 gcOnce（goroutine
+// 泄漏 + 关停后仍持续 GC）。捕获局部变量后，close(stop) 与 select 观测的是同一个
+// channel，StopGC 一定能让 goroutine 退出。
 func (r *Router) StartGC() {
 	r.mu.Lock()
 	if r.stop != nil {
 		r.mu.Unlock()
 		return
 	}
-	r.stop = make(chan struct{})
+	stop := make(chan struct{})
+	r.stop = stop
 	r.mu.Unlock()
 
 	go func() {
@@ -71,7 +87,7 @@ func (r *Router) StartGC() {
 		defer t.Stop()
 		for {
 			select {
-			case <-r.stop:
+			case <-stop:
 				return
 			case <-t.C:
 				r.gcOnce(time.Now())
@@ -113,11 +129,16 @@ func (r *Router) LoadFromStore() {
 	}
 }
 
-// Resolve 返回会话 key 应绑定的账号 uid，ok=false 表示当前无可用账号。
-// 命中且账号可用 → 滚动 lastActive 并直接返回；否则（lazy 异常情况）走重新分配。
-func (r *Router) Resolve(key string) (string, bool) {
+// ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
+// 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
+// 被该模型限流）走重新分配。
+//
+// 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
+// 对其他模型仍可用（见 pool.healthyForModel 的模型级冷却豁免）。若只按账号级
+// 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
+func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet()
+	available := r.availableSet(model)
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
@@ -128,7 +149,7 @@ func (r *Router) Resolve(key string) (string, bool) {
 			r.touch(key, e.uid, now)
 			return e.uid, true
 		}
-		// 绑定号已冷却/占满 → 失效，落入慢路径重分配。
+		// 绑定号在该模型上已冷却/占满/被限流 → 失效，落入慢路径重分配。
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
@@ -144,7 +165,7 @@ func (r *Router) Resolve(key string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice()
+	uids := r.availableSlice(model)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -237,9 +258,9 @@ func (r *Router) gcOnce(now time.Time) int {
 	return len(expiredKeys)
 }
 
-// availableSet 把 Available() 的有序列表转集合（快路径命中校验用）。
-func (r *Router) availableSet() map[string]bool {
-	uids := r.availableSlice()
+// availableSet 把可用账号列表转集合（快路径命中校验用）。
+func (r *Router) availableSet(model string) map[string]bool {
+	uids := r.availableSlice(model)
 	set := make(map[string]bool, len(uids))
 	for _, u := range uids {
 		set[u] = true
@@ -247,8 +268,12 @@ func (r *Router) availableSet() map[string]bool {
 	return set
 }
 
-// availableSlice 安全调用 Available（nil 函数视空池）。
-func (r *Router) availableSlice() []string {
+// availableSlice 安全调用可用账号函数（nil 函数视空池）。
+// 优先走 AvailableForModel（带模型过滤）；未注入时回落 Available（无模型维度）。
+func (r *Router) availableSlice(model string) []string {
+	if r.cfg.AvailableForModel != nil {
+		return r.cfg.AvailableForModel(model)
+	}
 	if r.cfg.Available == nil {
 		return nil
 	}
@@ -274,7 +299,13 @@ func hashIndex(key string, n int) int {
 //  2. metadata.conversationId
 //  3. conversation_id
 //  4. conversationId
-//  5. metadata.user_id
+//
+// 全部为 conversation 维度（对话级）。metadata.user_id 不再作为粘性键
+//（P1-anti-monopoly 剔除，issue118-deep-review §3）：user 维度粒度过粗——一个
+// user 的全部并行对话会钉同一账号（粘性范围远大于上游 prompt cache 的对话级边界），
+// 且曾抢占顶层 conversation_id 的优先级。剔除后发 user_id 的客户端回落加权轮换
+//（与无标识客户端同路径），旧 user_id 绑定靠 TTL（30m 滚动）与 Redis 镜像 TTL
+//（7d 兜底）自然过期，键消失不产生脏绑定。
 //
 // issue #35：客户端实际发 camelCase 的 conversationId，此前只识别 snake_case，
 // 导致粘性路由不命中、同对话轮转不同账号、上游上下文缓存 miss。现两种命名均识别，
@@ -292,9 +323,6 @@ func ExtractKey(body []byte) string {
 			return v
 		}
 		if v := strOrEmpty(meta["conversationId"]); v != "" {
-			return v
-		}
-		if v := strOrEmpty(meta["user_id"]); v != "" {
 			return v
 		}
 	}

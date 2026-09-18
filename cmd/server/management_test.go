@@ -34,7 +34,7 @@ func TestManagedConfigSaveRestartAndSecrets(t *testing.T) {
 	if err := m.save(json.RawMessage(`{"server":{"max_body_mb":16},"schedule":{"checkin_enabled":false}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if m.active.Server.MaxBodyMB != 8 {
+	if m.active.Server.MaxBodyMB != 20 {
 		t.Fatal("mutated live config")
 	}
 	raw, _ := json.Marshal(m.read())
