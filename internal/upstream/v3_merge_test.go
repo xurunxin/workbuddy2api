@@ -265,3 +265,53 @@ func countIDs(list []string, s string) int {
 	}
 	return n
 }
+
+// TestCNModelsTagsUnionFromEnterprise 活动标签只在企业端点下发（badge:限时免费 等），
+// v3/config 不带——同 id 合并时 tags 必须取并集，v3 命中的模型不得丢活动标签
+// （官方客户端模型列表可见「限时免费/夜间免费/独家优惠/夜间折扣」角标）。
+func TestCNModelsTagsUnionFromEnterprise(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	v3Body := `{"code":0,"data":{"models":[
+		{"id":"hy3","name":"Hy3","credits":"x0.00","tags":["craft"],"maxInputTokens":192000,"maxOutputTokens":64000},
+		{"id":"v3-only","name":"V3Only","credits":"x0.10","tags":["craft"],"maxInputTokens":100000,"maxOutputTokens":8000}
+	]}}`
+	consoleBody := `{"code":0,"data":{"models":[
+		{"id":"hy3","name":"Hy3","credits":"x0.00 credits","tags":["craft","badge:限时免费:#FF0000"],"maxInputTokens":192000,"maxOutputTokens":64000},
+		{"id":"ent-only","name":"EntOnly","credits":"x0.20","tags":["craft","badge:夜间折扣:#1E90FF"],"maxInputTokens":100000,"maxOutputTokens":8000}
+	],"agents":[{"name":"cli","models":["hy3","ent-only"]}]}}`
+
+	var mu sync.Mutex
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/v3/config") {
+			return jsonResp(200, v3Body), nil
+		}
+		return jsonResp(200, consoleBody), nil
+	})
+	cn := &auth.Auth{AccessToken: "at", UID: "cn1", Domain: "www.codebuddy.cn"}
+
+	infos, err := c.FetchModels(cn)
+	if err != nil {
+		t.Fatalf("cn fetch models: %v", err)
+	}
+	byID := map[string]ModelInfo{}
+	for _, mi := range infos {
+		byID[mi.ID] = mi
+	}
+	// 同 id：v3 主（credits 权威），但 tags 并集补进企业端点独有 badge。
+	hy3 := byID["hy3"]
+	if len(hy3.Tags) != 2 || hy3.Tags[0] != "craft" || hy3.Tags[1] != "badge:限时免费:#FF0000" {
+		t.Errorf("hy3 tags=%v want [craft badge:限时免费:#FF0000]（并集补活动标签）", hy3.Tags)
+	}
+	// v3 独有 id：无企业条目，tags 保持 v3 原值。
+	if got := byID["v3-only"].Tags; len(got) != 1 || got[0] != "craft" {
+		t.Errorf("v3-only tags=%v want [craft]（无 secondary 不改写）", got)
+	}
+	// 企业独有 id：整条补缺，tags 原样保留（含 badge）。
+	if got := byID["ent-only"].Tags; len(got) != 2 || got[1] != "badge:夜间折扣:#1E90FF" {
+		t.Errorf("ent-only tags=%v want craft+夜间折扣 badge（整条补缺）", got)
+	}
+}

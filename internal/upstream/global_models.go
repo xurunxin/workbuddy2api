@@ -238,6 +238,12 @@ func mergeGlobalCatalog(primaryNames []string, primaryInfos []ModelInfo, seconda
 			outInfos = append(outInfos, mi)
 		}
 	}
+	byID := make(map[string]int, len(outInfos)+len(secondaryInfos))
+	for i := range outInfos {
+		if outInfos[i].ID != "" {
+			byID[outInfos[i].ID] = i
+		}
+	}
 	for _, id := range secondaryNames {
 		if id == "" || seen[id] {
 			continue
@@ -247,10 +253,25 @@ func mergeGlobalCatalog(primaryNames []string, primaryInfos []ModelInfo, seconda
 		// 窄表企业响应（secondaryInfos nil / 超出条目数）时该 id 无对象字段，
 		// infos 保持原样（调用方按 id 名单输出裸条目，不编造字段）。
 		for _, mi := range secondaryInfos {
-			if mi.ID == id {
-				outInfos = append(outInfos, mi)
+			if mi.ID != id {
+				continue
+			}
+			if idx, dup := byID[id]; dup {
+				// 同 id（primaryInfos 非空但缺该 id 的名字条目等边角）：primary 字段
+				// 为准，仅并集补 tags——活动标签只在企业端点下发（v3 不带）。
+				if len(mi.Tags) > 0 {
+					merged := unionTags(outInfos[idx].Tags, mi.Tags)
+					if len(merged) != len(outInfos[idx].Tags) {
+						outInfos[idx].Tags = merged
+					}
+				}
 				break
 			}
+			outInfos = append(outInfos, mi)
+			if mi.ID != "" {
+				byID[mi.ID] = len(outInfos) - 1
+			}
+			break
 		}
 	}
 	return out, outInfos

@@ -1297,27 +1297,64 @@ func (c *Client) FetchModelsContext(ctx context.Context, a *auth.Auth) ([]ModelI
 
 // mergeModelInfos 合并两路模型目录：primary 为主（同 id 以 primary 条目为准——
 // credits 等字段以主端点为权威），secondary 只补 primary 缺失的 id。
+// 同 id 合并时 tags 取并集（去重、primary 原序在前）：活动标签（badge:限时免费 等）
+// 只在企业端点下发，v3/config 不带——只按 primary 取会让 v3 命中的模型丢失活动
+// 标签（官方客户端模型列表可见「限时免费/夜间免费/独家优惠/夜间折扣」角标）。
 // 去重 key = 模型 id；输出顺序 = primary 原序在前、secondary 补充项（secondary 原序）
 // 在后——稳定输出，不依赖 map 迭代序（任务书实现要点：排序保持稳定）。
 func mergeModelInfos(primary, secondary []ModelInfo) []ModelInfo {
 	if len(secondary) == 0 {
 		return primary
 	}
-	seen := make(map[string]bool, len(primary)+len(secondary))
+	byID := make(map[string]int, len(primary)+len(secondary))
 	out := make([]ModelInfo, 0, len(primary)+len(secondary))
 	for _, mi := range primary {
-		if mi.ID == "" || seen[mi.ID] {
+		if mi.ID == "" {
 			continue
 		}
-		seen[mi.ID] = true
+		if _, dup := byID[mi.ID]; dup {
+			continue
+		}
+		byID[mi.ID] = len(out)
 		out = append(out, mi)
 	}
 	for _, mi := range secondary {
-		if mi.ID == "" || seen[mi.ID] {
+		if mi.ID == "" {
 			continue
 		}
-		seen[mi.ID] = true
+		if idx, dup := byID[mi.ID]; dup {
+			// 同 id：以 primary 字段为准，仅并集补 tags（secondary 独有标签）。
+			if len(mi.Tags) > 0 {
+				merged := unionTags(out[idx].Tags, mi.Tags)
+				if len(merged) != len(out[idx].Tags) {
+					out[idx].Tags = merged
+				}
+			}
+			continue
+		}
+		byID[mi.ID] = len(out)
 		out = append(out, mi)
+	}
+	return out
+}
+
+// unionTags 返回 a+b 的去重并集（a 原序在前，b 独有项按原序追加）。
+func unionTags(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, t := range a {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	for _, t := range b {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
 	}
 	return out
 }
