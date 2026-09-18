@@ -1070,34 +1070,37 @@ func (c *Client) chatPaths(a *auth.Auth) []string {
 // CN /console 与 global /v2 的模型对象同构（2026-09-15 global 真实账号 /v2 探测
 // 实证，字段集与任务书 hy3 样本一致），故共用此结构；上游省略的字段保持零值，
 // /v1/models 侧按「空值省略」透出（不编造）。
+// ModelInfo 字段带 json tag：admin 控制台「客户端配置」面板直接序列化 catalog 视图
+// （View.Models []ModelInfo），前端按 id/name/max_input_tokens 等小写下划线键读取；
+// /v1/models 端点走 map 组装不经此处 tag，但 tag 与其字段口径保持一致。
 type ModelInfo struct {
-	ID             string
-	Name           string
-	ContextWindow  int64    // = maxInputTokens
-	MaxTokens      int64    // = maxOutputTokens
-	Efforts        []string // reasoning.supportedEfforts（空=未知/固定档）
-	DefaultEffort  string   // reasoning.defaultEffort（空=未声明，thinking.go 回退硬编码）
-	SupportsImages bool     // 顶层 supportsImages（多模态能力，透出到 /v1/models）
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	ContextWindow  int64    `json:"max_input_tokens"`  // = maxInputTokens
+	MaxTokens      int64    `json:"max_output_tokens"` // = maxOutputTokens
+	Efforts        []string `json:"reasoning_efforts"` // reasoning.supportedEfforts（空=未知/固定档）
+	DefaultEffort  string   `json:"default_effort"`    // reasoning.defaultEffort（空=未声明，thinking.go 回退硬编码）
+	SupportsImages bool     `json:"supports_images"`   // 顶层 supportsImages（多模态能力，透出到 /v1/models）
 
 	// 以下为模型目录全字段补齐（任务书 models-full-fields）：
-	Description       string   // descriptionZh 中文描述
-	Credits           string   // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
-	Tags              []string // tags 模型标签（含 badge:限时免费 等）
-	Vendor            string   // vendor 厂商标识
-	IsDefault         bool     // isDefault 是否默认模型
-	SupportsReasoning bool     // supportsReasoning 是否支持推理
-	SupportsToolCall  bool     // supportsToolCall 是否支持工具调用
-	OnlyReasoning     bool     // onlyReasoning 是否纯推理模型
-	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
-	ReasoningEffort   string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
-	ReasoningSummary  string   // reasoning.summary 推理摘要模式（如 "auto"）
+	Description       string   `json:"description"`        // descriptionZh 中文描述
+	Credits           string   `json:"credits"`            // credits 积分倍率原文（如 "x0.05"），仅展示不参与选号
+	Tags              []string `json:"tags"`               // tags 模型标签（含 badge:限时免费 等）
+	Vendor            string   `json:"vendor"`             // vendor 厂商标识
+	IsDefault         bool     `json:"is_default"`         // isDefault 是否默认模型
+	SupportsReasoning bool     `json:"supports_reasoning"` // supportsReasoning 是否支持推理
+	SupportsToolCall  bool     `json:"supports_tool_call"` // supportsToolCall 是否支持工具调用
+	OnlyReasoning     bool     `json:"only_reasoning"`     // onlyReasoning 是否纯推理模型
+	MaxAllowedSize    int64    `json:"max_allowed_size"`   // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
+	ReasoningEffort   string   `json:"reasoning_effort"`   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
+	ReasoningSummary  string   `json:"reasoning_summary"`  // reasoning.summary 推理摘要模式（如 "auto"）
 
 	// 本分支保留字段：credit 倍率解析结果（catalog/admin 面板展示用）。
 	// credits_label 原文 + 解析出的数值倍率（nil=未知）与倍率种类（relative/dynamic/unknown）。
-	CreditsLabel       string
-	CreditMultiplier   *float64
-	CreditType         string
-	CanDisableThinking bool
+	CreditsLabel       string   `json:"credits_label"`
+	CreditMultiplier   *float64 `json:"credit_multiplier"`
+	CreditType         string   `json:"credit_type"`
+	CanDisableThinking bool     `json:"can_disable_thinking"`
 }
 
 var creditRatePattern = regexp.MustCompile(`(?i)^[x×]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+credits?)?$`)
