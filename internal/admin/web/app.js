@@ -76,6 +76,18 @@
       ? "未知"
       : date.toLocaleString("zh-CN", { hour12: false });
   }
+  // fmtRemain 把剩余秒数格式化为 "1时23分" / "4分05秒" / "42秒"（模型限额恢复倒计时）。
+  function fmtRemain(sec) {
+    sec = Math.max(0, Math.round(Number(sec) || 0));
+    if (sec < 60) return `${sec}秒`;
+    const totalMin = Math.floor(sec / 60);
+    if (totalMin < 60) return `${totalMin}分${String(sec % 60).padStart(2, "0")}秒`;
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    if (h < 24) return `${h}时${String(m).padStart(2, "0")}分`;
+    const d = Math.floor(h / 24);
+    return `${d}天${h % 24}时`;
+  }
   function duration(s) {
     s = Number(s) || 0;
     const h = Math.floor(s / 3600);
@@ -320,6 +332,30 @@
           ? `${a.reason ? `${a.reason} · ` : ""}剩余 ${a.cool_remaining_sec ?? "未知"} 秒`
           : a.reason;
       if (detail) statusCell.append(node("small", detail, "status-detail"));
+      // 模型级限额台账（6004）：每模型一行，显示剩余恢复时间——Until/ResetAt 取
+      // 更晚者（ResetAt 是上游权威墙钟，Until 可能被 soft_rate_max 截断过）。
+      if (Array.isArray(a.rate_limited_models) && a.rate_limited_models.length) {
+        const box = node("div", undefined, "rate-limited");
+        a.rate_limited_models.forEach((m) => {
+          if (!m || !m.model) return;
+          const end = [m.reset_at, m.until]
+            .filter(Boolean)
+            .map((v) => new Date(v))
+            .filter((d) => Number.isFinite(d.getTime()))
+            .sort((x, y) => y - x)[0];
+          let remain = "恢复中";
+          if (end) {
+            const sec = Math.round((end.getTime() - Date.now()) / 1000);
+            remain =
+              sec > 0
+                ? `剩 ${fmtRemain(sec)}（${fmtTime(end.getTime())} 恢复）`
+                : "已到恢复时点";
+          }
+          const line = node("small", `⛔ ${m.model}：${remain}`, "status-detail rate-limited-line");
+          box.append(line);
+        });
+        if (box.childElementCount) statusCell.append(box);
+      }
       tr.append(statusCell);
       tr.append(node("td", String(a.in_flight || 0)));
       tr.append(node("td", knownCredits ? fmtTime(checked[a.uid]) : "未查询"));
@@ -466,19 +502,41 @@
   }
   function formatCredit(model) {
     const label = String(model && model.credits_label || "").trim();
+    const multiplier = model && model.credit_multiplier;
+    // 倍率数值已解析（含显式 0）时不再拼接原文——否则 "×0.03 · x0.03" 同一倍率显示两遍。
+    if (typeof multiplier === "number" && Number.isFinite(multiplier)) {
+      // 数值 0 且原文也是 0 → 就是限免/免费，交给标签列表达，不重复展示。
+      return formatMultiplier(model);
+    }
     if (!label || /^(auto|动态)$/i.test(label)) return formatMultiplier(model);
     return `${formatMultiplier(model)} · ${label}`;
   }
   function modelTags(model) {
     if (!Array.isArray(model && model.tags)) return [];
-    return model.tags.reduce((tags, raw) => {
+    const out = [];
+    let hasBadge = false;
+    model.tags.reduce((tags, raw) => {
       const value = String(raw || "").trim();
       if (!value || value.toLowerCase() === "craft") return tags;
       const badge = value.match(/^badge:([^:]+):#([0-9a-f]{6})$/i);
-      if (badge) tags.push({ label: badge[1], color: `#${badge[2].toUpperCase()}` });
-      else tags.push({ label: value, color: "" });
+      if (badge) {
+        tags.push({ label: badge[1], color: `#${badge[2].toUpperCase()}` });
+        hasBadge = true;
+      } else tags.push({ label: value, color: "" });
       return tags;
-    }, []);
+    }, out);
+    // 上游未下发活动 badge 且实测积分为 0 → 推导「限免」标签（免费层可观测，
+    // 与成本账本 tier 0 同口径；显式 0 是合法免费观测）。
+    const multiplier = model && model.credit_multiplier;
+    if (
+      !hasBadge &&
+      typeof multiplier === "number" &&
+      Number.isFinite(multiplier) &&
+      multiplier <= 0
+    ) {
+      out.push({ label: "限免", color: "#16a34a" });
+    }
+    return out;
   }
   function visibleModels() {
     const query = state.modelSearch.trim().toLowerCase();

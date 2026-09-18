@@ -410,6 +410,15 @@ tbody tr:last-child td {
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
+/* 模型级限额（6004）台账行：账号状态格内的逐模型恢复倒计时。 */
+.rate-limited {
+  margin-top: 5px;
+  display: grid;
+  gap: 3px;
+}
+.rate-limited .rate-limited-line {
+  color: #b45309;
+}
 .table-actions {
   display: flex;
   justify-content: flex-end;
