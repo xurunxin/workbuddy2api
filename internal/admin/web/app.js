@@ -14,6 +14,9 @@
     dirtyConfig: false,
     models: {
       uid: "",
+      // realm 拉取该账号目录时后端标注的域（"cn" / "global"）：控制台据此提示
+      // 当前展示的是中国区还是国际区目录，两区模型不混为一谈。
+      realm: "",
       items: [],
       source: "",
       fetchedAt: null,
@@ -25,7 +28,11 @@
       loading: false,
     },
     modelSearch: "",
+    modelKind: "all",
     modelSort: "default",
+    // modelGroups 展开态：默认折叠 router/media 两组（档位与图像模型不与普通模型
+    // 平铺混列，用户明确要求），点击组头切换。
+    modelGroups: { chat: true, router: false, image: false, video: false },
     selectedModelID: "",
     keys: {
       items: [],
@@ -231,6 +238,7 @@
     $("import-file").value = "";
     $("advanced-json").value = "";
     $("model-search").value = "";
+    $("model-kind").value = "all";
     $("model-sort").value = "default";
     clearKeySecret();
     $("login-view").hidden = false;
@@ -479,6 +487,7 @@
       if (detail) detail.textContent = message;
     }
     if ($("model-detail")) $("model-detail").hidden = true;
+    if ($("model-realm")) $("model-realm").hidden = true;
     if ($("model-picker")) clearChildren($("model-picker"));
     if ($("model-id")) $("model-id").textContent = "—";
     if ($("model-facts")) clearChildren($("model-facts"));
@@ -511,13 +520,17 @@
     if (!label || /^(auto|动态)$/i.test(label)) return formatMultiplier(model);
     return `${formatMultiplier(model)} · ${label}`;
   }
+  // MEDIA_TAGS 已在「分类」列（kind=image/video）表达的媒体能力标记：
+  // 这些 tag 是分类的**来源**而非活动标签，重复展示只会让「活动标签」列变成噪音。
+  // craft 同理（上游内部标记，与用户无关，历史实现已过滤）。
+  const MEDIA_TAGS = new Set(["craft", "text-to-image", "image-to-image", "text-to-video", "image-to-video"]);
   function modelTags(model) {
     if (!Array.isArray(model && model.tags)) return [];
     const out = [];
     let hasBadge = false;
     model.tags.reduce((tags, raw) => {
       const value = String(raw || "").trim();
-      if (!value || value.toLowerCase() === "craft") return tags;
+      if (!value || MEDIA_TAGS.has(value.toLowerCase())) return tags;
       const badge = value.match(/^badge:([^:]+):#([0-9a-f]{6})$/i);
       if (badge) {
         tags.push({ label: badge[1], color: `#${badge[2].toUpperCase()}` });
@@ -538,9 +551,40 @@
     }
     return out;
   }
+  // modelKind 模型分类（与后端 upstream.ModelKind 一一对应）：
+  //   chat=普通对话 / router=自动路由档位 / image=图像 / video=视频。
+  // 缺 kind 的旧快照一律按 chat 处理（向后兼容，不因字段缺失而丢模型）。
+  const MODEL_KINDS = {
+    chat: { label: "对话", hint: "普通对话模型，走 /v1/chat/completions 或 /v1/responses" },
+    router: { label: "自动路由", hint: "上游按任务自动挑模型的虚拟档位，不是具体模型" },
+    image: { label: "图像", hint: "图像模型，走 /v1/images/generations 与 /v1/images/edits" },
+    video: { label: "视频", hint: "视频模型，本网关暂无独立入口" },
+    completion: { label: "补全", hint: "代码补全 / NES 等非对话专用模型" },
+  };
+  function modelKindOf(model) {
+    const kind = String((model && model.kind) || "").toLowerCase();
+    return MODEL_KINDS[kind] ? kind : "chat";
+  }
+  function modelKindLabel(model) {
+    return MODEL_KINDS[modelKindOf(model)].label;
+  }
+  // kindBadge 分类徽标；router 档位额外显示中文档位名（快速/均衡/极致）。
+  function kindBadge(model) {
+    const kind = modelKindOf(model);
+    const pill = node("span", MODEL_KINDS[kind].label, `pill kind-badge kind-${kind}`);
+    pill.title = MODEL_KINDS[kind].hint;
+    if (kind === "router" && model.router_tier) {
+      const wrap = document.createElement("span");
+      wrap.className = "kind-cell";
+      wrap.append(pill, node("small", model.router_tier, "kind-tier"));
+      return wrap;
+    }
+    return pill;
+  }
   function visibleModels() {
     const query = state.modelSearch.trim().toLowerCase();
     const models = state.models.items.filter((model) => {
+      if (state.modelKind !== "all" && modelKindOf(model) !== state.modelKind) return false;
       if (!query) return true;
       return `${model.id || ""} ${model.name || ""} ${model.description || ""}`.toLowerCase().includes(query);
     });
@@ -554,6 +598,13 @@
       return state.modelSort === "asc" ? a - b : b - a;
     });
   }
+  // groupModels 按分类分组（保持后端原序）。用户要求自动路由档位与图像等特殊模型
+  // 不与普通模型混列，故分组渲染而非平铺。
+  function groupModels(models) {
+    const groups = { chat: [], router: [], image: [], video: [], completion: [] };
+    models.forEach((m) => { groups[modelKindOf(m)].push(m); });
+    return groups;
+  }
   function renderModelSource() {
     const out = state.models;
     const sourceLabel = { upstream: "上游最新", cache: "缓存", stale: "过期缓存", unavailable: "不可用" }[out.source] || "未读取";
@@ -564,17 +615,44 @@
     if (out.error) parts.push(`失败：${out.error}`);
     $("model-source").textContent = parts.join(" · ");
     $("model-source").className = `model-source ${out.source === "unavailable" || out.stale ? "warning" : ""}`;
+    // realm 徽标：明确标注当前展示的是中国区还是国际区账号的目录。
+    const badge = $("model-realm");
+    if (!badge) return;
+    if (!out.realm || !out.items.length) {
+      badge.hidden = true;
+      return;
+    }
+    const isGlobal = out.realm === "global";
+    badge.hidden = false;
+    badge.textContent = isGlobal
+      ? "国际区账号（global）：目录来自 workbuddy.ai 上游，仅含国际区模型"
+      : "中国区账号（cn）：目录来自 codebuddy.cn 上游，仅含中国区模型";
+    badge.className = `realm-badge ${isGlobal ? "realm-global" : "realm-cn"}`;
   }
   function renderModelCapabilities(model) {
     const capabilities = [];
-    if (model.supports_images) capabilities.push("图片");
+    // 附件能力优先用后端 attachments/supports_attachments（单一事实来源），
+    // 后端未给该字段（旧快照）时回落 supports_images。
+    const attachments = Array.isArray(model.attachments) ? model.attachments.filter(Boolean) : [];
+    const hasImageAttachment = attachments.includes("image") ||
+      (attachments.length === 0 && model.supports_attachments === true) ||
+      (model.supports_attachments === undefined && model.supports_images === true);
+    if (hasImageAttachment) {
+      capabilities.push(attachments.length ? `附件：${attachments.join(" / ")}` : "图片");
+    }
+    if (model.disabled_multimodal) capabilities.push("多模态已关闭");
     if (model.supports_tool_call) capabilities.push("工具");
     if (model.supports_reasoning) {
       const efforts = Array.isArray(model.reasoning_efforts) ? model.reasoning_efforts.filter(Boolean) : [];
       capabilities.push(efforts.length ? `推理：${efforts.join(" / ")}` : "推理");
     }
     if (model.can_disable_thinking) capabilities.push("可关闭思考");
-    return capabilities.length ? capabilities : ["基础对话"];
+    if (!capabilities.length) {
+      const kind = modelKindOf(model);
+      if (kind === "image" || kind === "video") return ["媒体模型"];
+      return ["基础对话"];
+    }
+    return capabilities;
   }
   function renderModelDetails(model, visible) {
     const detail = $("model-detail");
@@ -595,6 +673,7 @@
     const facts = $("model-facts");
     clearChildren(facts);
     const fields = [
+      ["分类", modelKindLabel(model) + (model.router_tier ? ` · ${model.router_tier}` : "")],
       ["积分倍率", formatCredit(model)],
       ["最大输入", formatTokens(model.max_input_tokens)],
       ["最大输出", formatTokens(model.max_output_tokens)],
@@ -608,6 +687,71 @@
     if (model.description) facts.append(node("p", model.description, "model-description"));
     renderModelExample(model);
   }
+  // modelRow 构造一行模型 <tr>（分组渲染与平铺渲染共用同一套单元格口径）。
+  function modelRow(model, selectedID) {
+    const row = document.createElement("tr");
+    row.tabIndex = 0;
+    row.className = model.id === selectedID ? "selected" : "";
+    row.setAttribute("aria-selected", model.id === selectedID ? "true" : "false");
+    row.addEventListener("click", () => selectModel(model.id));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectModel(model.id);
+      }
+    });
+    const identity = node("td");
+    identity.append(node("strong", model.name || model.id || "未命名模型"));
+    identity.append(node("code", model.id || "未知", "model-row-id"));
+    if (model.description) identity.append(node("small", model.description, "model-row-description"));
+    row.append(identity);
+    const kindCell = node("td", undefined, "model-kind");
+    kindCell.append(kindBadge(model));
+    row.append(kindCell);
+    row.append(node("td", formatMultiplier(model), "model-credit"));
+    row.append(node("td", `${formatTokens(model.max_input_tokens)} / ${formatTokens(model.max_output_tokens)}`));
+    row.append(node("td", renderModelCapabilities(model).join("、"), "model-capabilities"));
+    const tags = node("td", undefined, "model-tags");
+    modelTags(model).forEach((tag) => {
+      const pill = node("span", tag.label, "pill model-tag-badge");
+      if (tag.color) {
+        pill.style.color = tag.color;
+        pill.style.borderColor = tag.color;
+      }
+      tags.append(pill);
+    });
+    if (!tags.childElementCount) tags.append(node("span", "—", "muted"));
+    row.append(tags);
+    return row;
+  }
+  // modelGroupRow 分组表头行（可折叠）：档位 / 图像 / 视频 / 补全 各自成组，
+  // 组头显示名称、条数与该组用途说明。
+  function modelGroupRow(kind, count) {
+    const row = document.createElement("tr");
+    row.className = `model-group-row group-${kind}`;
+    const cell = document.createElement("td");
+    cell.colSpan = 6;
+    const expanded = Boolean(state.modelGroups[kind]);
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "model-group-head";
+    head.setAttribute("aria-expanded", expanded ? "true" : "false");
+    head.append(node("span", expanded ? "▾" : "▸", "model-group-caret"));
+    head.append(node("strong", MODEL_KINDS[kind].label));
+    head.append(node("span", `${count} 个`, "model-group-count"));
+    head.append(node("small", MODEL_KINDS[kind].hint, "model-group-hint"));
+    head.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.modelGroups[kind] = !state.modelGroups[kind];
+      renderModels();
+    });
+    cell.append(head);
+    row.append(cell);
+    return row;
+  }
+  // GROUP_ORDER 分组渲染次序：普通对话模型在最前（主体），特殊模型分列其后
+  // ——用户要求档位/图像等不与普通模型混在一起。
+  const GROUP_ORDER = ["chat", "router", "image", "video", "completion"];
   function renderModels() {
     const all = state.models.items;
     const visible = visibleModels();
@@ -619,47 +763,33 @@
       const title = $("models-empty").querySelector("strong");
       const detail = $("models-empty").querySelector("p");
       if (title) title.textContent = all.length ? "没有匹配模型" : "暂无模型数据";
-      if (detail) detail.textContent = all.length ? "调整搜索关键词后重试。" : "当前账号没有可展示的动态模型。";
+      if (detail) detail.textContent = all.length ? "调整搜索或分类筛选后重试。" : "当前账号没有可展示的动态模型。";
       renderModelDetails(null, visible);
       return;
     }
+    const groups = groupModels(visible);
+    const present = GROUP_ORDER.filter((kind) => groups[kind].length > 0);
+    // 单组（只有普通对话模型）时不显示组头——避免给最常见的场景加无意义的标题。
+    const grouped = present.length > 1 || (present.length === 1 && present[0] !== "chat");
+    // 默认选中项必须落在**可见**行上：折叠组里的模型虽在 visible 里，但没渲染出来，
+    // 选中它会让右侧详情面板显示一个列表上看不到的模型（容易让人以为选错了）。
+    // 故优先在展开的组内选，全部折叠时回落到第一个可见行。
+    const expandedGroups = present.filter((kind) => !grouped || Boolean(state.modelGroups[kind]));
     let selected = visible.find((model) => model.id === state.selectedModelID);
-    if (!selected) {
-      selected = visible[0];
+    const selectedVisible = selected && (!grouped || !expandedGroups.length || expandedGroups.includes(modelKindOf(selected)));
+    if (!selectedVisible) {
+      const candidates = grouped && expandedGroups.length
+        ? visible.filter((model) => expandedGroups.includes(modelKindOf(model)))
+        : visible;
+      selected = candidates[0] || visible[0];
       state.selectedModelID = selected.id;
     }
-    visible.forEach((model) => {
-      const row = document.createElement("tr");
-      row.tabIndex = 0;
-      row.className = model.id === selected.id ? "selected" : "";
-      row.setAttribute("aria-selected", model.id === selected.id ? "true" : "false");
-      row.addEventListener("click", () => selectModel(model.id));
-      row.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          selectModel(model.id);
-        }
-      });
-      const identity = node("td");
-      identity.append(node("strong", model.name || model.id || "未命名模型"));
-      identity.append(node("code", model.id || "未知", "model-row-id"));
-      if (model.description) identity.append(node("small", model.description, "model-row-description"));
-      row.append(identity);
-      row.append(node("td", formatMultiplier(model), "model-credit"));
-      row.append(node("td", `${formatTokens(model.max_input_tokens)} / ${formatTokens(model.max_output_tokens)}`));
-      row.append(node("td", renderModelCapabilities(model).join("、"), "model-capabilities"));
-      const tags = node("td", undefined, "model-tags");
-      modelTags(model).forEach((tag) => {
-        const pill = node("span", tag.label, "pill model-tag-badge");
-        if (tag.color) {
-          pill.style.color = tag.color;
-          pill.style.borderColor = tag.color;
-        }
-        tags.append(pill);
-      });
-      if (!tags.childElementCount) tags.append(node("span", "—", "muted"));
-      row.append(tags);
-      body.append(row);
+    present.forEach((kind) => {
+      const items = groups[kind];
+      const expanded = !grouped || Boolean(state.modelGroups[kind]);
+      if (grouped) body.append(modelGroupRow(kind, items.length));
+      if (!expanded) return;
+      items.forEach((model) => body.append(modelRow(model, selected.id)));
     });
     renderModelDetails(selected, visible);
   }
@@ -670,16 +800,24 @@
   }
   function renderModelExample(model) {
     const kind = $("model-example-kind").value || "responses";
-    const endpoint = kind === "chat" ? "/v1/chat/completions" : "/v1/responses";
-    const body = kind === "chat"
-      ? `{
-  "model": ${JSON.stringify(model.id)},
-  "messages": [{"role": "user", "content": "Hello"}]
-}`
-      : `{
-  "model": ${JSON.stringify(model.id)},
-  "input": "Hello"
-}`;
+    const modelKind = modelKindOf(model);
+    // 图像模型必须走 Images API——送到 chat completions 会被上游按 11102/11133 拒绝。
+    // 示例按模型分类自动选端点，避免复制到一份注定失败的配置。
+    const effective = modelKind === "image" && kind !== "image" ? "image" : kind;
+    let endpoint = "/v1/responses";
+    let body = `{\n  "model": ${JSON.stringify(model.id)},\n  "input": "Hello"\n}`;
+    if (effective === "chat") {
+      endpoint = "/v1/chat/completions";
+      body = `{\n  "model": ${JSON.stringify(model.id)},\n  "messages": [{"role": "user", "content": "Hello"}]\n}`;
+    } else if (effective === "image") {
+      // 图生图模型（tags 含 image-to-image）走 /v1/images/edits 且必须带输入图；
+      // 其余图像模型走 /v1/images/generations。
+      const isEdit = Array.isArray(model.tags) && model.tags.some((t) => String(t).toLowerCase() === "image-to-image");
+      endpoint = isEdit ? "/v1/images/edits" : "/v1/images/generations";
+      body = isEdit
+        ? `{\n  "model": ${JSON.stringify(model.id)},\n  "prompt": "把背景换成雪山",\n  "image": "https://example.com/input.png"\n}`
+        : `{\n  "model": ${JSON.stringify(model.id)},\n  "prompt": "一只在屋顶上看星星的猫"\n}`;
+    }
     $("model-example").textContent = `curl ${location.origin}${endpoint} \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '${body.replace(/'/g, "'\\''")}'`;
   }
   async function loadModels(uid, force = false) {
@@ -692,6 +830,7 @@
     state.models.loaded = false;
     state.models.loading = true;
     state.models.items = [];
+    state.models.realm = "";
     state.selectedModelID = "";
     clearModelView("正在读取模型列表…");
     $("models-refresh").disabled = true;
@@ -704,6 +843,7 @@
       state.models = {
         ...state.models,
         uid,
+        realm: out.realm || "",
         items: Array.isArray(out.models) ? out.models : [],
         source: out.source || "unavailable",
         fetchedAt: out.fetched_at || null,
@@ -723,7 +863,7 @@
       }
     } catch (err) {
       if (state.csrf !== session || state.sessionEpoch !== epoch || state.models.request !== request || state.models.uid !== uid) return;
-      state.models = { ...state.models, source: "unavailable", items: [], stale: false, error: err.message, loaded: true, loading: false };
+      state.models = { ...state.models, source: "unavailable", realm: "", items: [], stale: false, error: err.message, loaded: true, loading: false };
       clearModelView(err.message || "当前账号的模型列表不可用。");
       renderModelSource();
     } finally {
@@ -1329,6 +1469,13 @@
     state.modelSearch = event.target.value;
     if (state.models.items.length) renderModels();
   });
+  $("model-kind").addEventListener("change", (event) => {
+    state.modelKind = event.target.value || "all";
+    // 切到某一分类时自动展开该组（否则用户选了"自动路由档位"却看到折叠的组头，
+    // 会以为筛选没生效）。
+    if (state.modelKind !== "all") state.modelGroups[state.modelKind] = true;
+    if (state.models.items.length) renderModels();
+  });
   $("model-sort").addEventListener("change", (event) => {
     state.modelSort = event.target.value;
     if (state.models.items.length) renderModels();
@@ -1337,8 +1484,7 @@
   $("model-example-kind").addEventListener("change", () => {
     const model = state.models.items.find((item) => item.id === state.selectedModelID);
     if (model) renderModelExample(model);
-  });
-  $("copy-model-id").addEventListener("click", () => {
+  });  $("copy-model-id").addEventListener("click", () => {
     const model = state.models.items.find((item) => item.id === state.selectedModelID);
     if (model) copyText(model.id, "模型名");
   });

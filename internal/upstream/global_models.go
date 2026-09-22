@@ -337,8 +337,9 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 }
 
 // parseGlobalModelNames 容忍两种形态解析模型名：
-//   - 对象数组：data.models[].id/.name（id 优先），disabled 剔除；
-//   - 窄表：data 为字符串数组。
+//   - 对象数组：data.models[].id/.name（id 优先），disabled 剔除，非对话条目
+//     （nonChatModel：补全/NES/tiny/图像/视频）剔除；
+//   - 窄表：data 为字符串数组（无 tags 可判，仅按 id 家族做 nonChatModel 兜底）。
 //
 // 对象形态与 CN 模型对象同构（dynModelEntry 共用解析口径），额外产出全字段 ModelInfo
 // 与 reasoning.supportedEfforts / defaultEffort（P0：global 域 effort 探测，解析不到时
@@ -366,7 +367,7 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 		}
 		out := make([]string, 0, len(arr))
 		for _, id := range arr {
-			if id = strings.TrimSpace(id); id != "" {
+			if id = strings.TrimSpace(id); id != "" && !nonChatModel(id, 0, nil) {
 				out = append(out, id)
 			}
 		}
@@ -391,6 +392,13 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 			id = m.Name
 		}
 		if id == "" || m.Disabled {
+			continue
+		}
+		// 非对话条目（nes-/completion-/codewise- 前缀、maxOutputTokens≤256、
+		// tags 含 text-to-image **或 image-to-image**）挡在 global 名单外——与 CN
+		// enterprise 路径同一条 nonChatModel 口径。此前 global 探测缺这道过滤，
+		// 图像/图像编辑模型（hunyuan-image-alpha-edit 等）会混进 global: 模型列表。
+		if nonChatModel(id, m.MaxOutputTokens, m.Tags) {
 			continue
 		}
 		out = append(out, id)

@@ -101,9 +101,9 @@ func (h *Handler) accountAction(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.ReviveDisabled(uid)
 	case "credits":
 		// Read a detached credential snapshot so RPC reads cannot race with refresh.
-		a.Lock()
-		copy := &auth.Auth{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain, UID: a.UID, EnterpriseID: a.EnterpriseID}
-		a.Unlock()
+		// 走 auth.Snapshot 而非手工构造 Auth：后者会丢掉未导出的 realm，让
+		// 「显式 realm=global + cn domain」的账号被判成 cn 而查错域的积分。
+		copy := a.Snapshot()
 		if copy.NeedsRefresh(0) {
 			if err := h.cfg.Upstream.RefreshToken(a); err != nil {
 				fail(w, 502, "账号凭证刷新失败，请重新授权账号")
@@ -114,9 +114,7 @@ func (h *Handler) accountAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.cfg.Pool.ClearSessionDead(uid)
-			a.Lock()
-			copy = &auth.Auth{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain, UID: a.UID, EnterpriseID: a.EnterpriseID}
-			a.Unlock()
+			copy = a.Snapshot()
 		}
 		resource, err := h.cfg.Upstream.ResourceUsage(copy)
 		if err != nil {

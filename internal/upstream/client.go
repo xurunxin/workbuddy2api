@@ -218,7 +218,7 @@ var accountFaultRule = errorRule{kind: ErrAccountFault, mode: matchFold, pattern
 //
 // 只在 400/404/413 请求级状态码上判（429+11115 概率极低且属限流语义优先，
 // 5xx 属服务端故障优先）——与 IsModelBlocked 的 400/404 口径同理。误判代价
-//（好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
+// （好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
 // 上游原文可自行排查，代价可控。
 var promptTooLongRule = errorRule{kind: ErrPromptTooLong, mode: matchFold, patterns: []string{
 	`"code":11115`,
@@ -253,7 +253,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 错误风暴（429 轰炸）时尤甚。模式串均为纯常量，与 sanitize.go 的包级
 // 预编译先例保持一致。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -653,6 +653,20 @@ type Client struct {
 	// false 即显式逃生门：即使用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
+
+	// ImageGeneratePath / ImageEditPath 图像模型（text-to-image / image-to-image）
+	// 的上游端点路径覆盖（不含 base，base 由 realm 决定）。空 = 内置默认
+	// （/v2/images/generations、/v2/images/edits，**已实测确认**，见 images.go 文件头
+	// 「实测结论」）。config upstream.image_generate_path / image_edit_path 覆盖。
+	//
+	// 保留可配的原因：上游若将来调整路径，改配置即可适配，无需改代码重新发版。
+	// 正常情况下不需要设置（默认值就是实测值）。
+	ImageGeneratePath string
+	ImageEditPath     string
+
+	// ImageBodyLimit 图像响应体读取上限（字节）。<=0 → 64MB。
+	// 图像响应远大于文本（base64 内联单张约 1-3MB，多张叠加）。
+	ImageBodyLimit int64
 }
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：禁 h2 /
@@ -1101,6 +1115,24 @@ type ModelInfo struct {
 	CreditMultiplier   *float64 `json:"credit_multiplier"`
 	CreditType         string   `json:"credit_type"`
 	CanDisableThinking bool     `json:"can_disable_thinking"`
+
+	// 以下为模型分类与能力补齐（任务书 model-catalog-verify / model-attachments）：
+	// Kind 模型分类（chat/router/image/video/completion），透出到 /v1/models 的 kind 字段，
+	// 并驱动 routing_models（自动路由档位单列）与 media_models（图像/视频单列）分组键。
+	Kind ModelKind `json:"kind"`
+	// DisabledMultimodal 上游显式关闭多模态（disabledMultimodal=true）。
+	DisabledMultimodal bool `json:"disabled_multimodal,omitempty"`
+	// Attachments 入站附件类型（当前只可能是 ["image"]；未知为空 → 省略字段，不编造）。
+	// 判定见 ModelAttachments：supportsImages / disabledMultimodal / image-to-image tag。
+	Attachments []string `json:"attachments,omitempty"`
+	// SupportsAttachments Attachments 非空的布尔等价（客户端少写一次数组判空）。
+	SupportsAttachments bool `json:"supports_attachments"`
+	// RouterTier 自动路由档位的展示名（Kind==router 时非空，如 fast-model → 快速）。
+	RouterTier string `json:"router_tier,omitempty"`
+	// DefaultLength 上游 contextWindow.defaultLength（当前生效的上下文档位）；
+	// ContextWindowTiers 是 contextWindow.supportedLengths 可选档位表（升序原样）。
+	DefaultLength      int64   `json:"default_length,omitempty"`
+	ContextWindowTiers []int64 `json:"context_window_tiers,omitempty"`
 }
 
 var creditRatePattern = regexp.MustCompile(`(?i)^[x×]\s*([0-9]+(?:\.[0-9]+)?)(?:\s+credits?)?$`)
@@ -1124,6 +1156,18 @@ func creditRate(id, label string) (*float64, string) {
 // dynModelEntry 上游模型目录（CN /console 与 global /v2 同构）的单条模型解析形态，
 // FetchModels 与 global_models.go 的探测共用。iconUrl/descriptionEn/生成参数等
 // 按「不透出」原则不解析（任务书 §不透出字段）。
+//
+// 字段集实测核对（2026-09-18，本机 WorkBuddy 桌面端 /v3/config 原始响应缓存
+// cache/acc-product-config-v3*.json，48~51 条 models 全字段并集）：
+//
+//	id name descriptionZh credits tags vendor isDefault maxInputTokens maxOutputTokens
+//	maxAllowedSize disabled supportsImages supportsReasoning supportsToolCall onlyReasoning
+//	disabledMultimodal summary temperature top_k top_p repetition_penalty supportsExtra
+//	contextWindow{defaultLength,supportedLengths} relatedModels{lite,reasoning}
+//	reasoning{effort,summary,defaultEffort,supportedEfforts,canDisableThinking}
+//
+// 其中 iconUrl/descriptionEn/temperature/top_k/top_p/repetition_penalty/supportsExtra/
+// relatedModels 属生成参数与客户端内部路由，按「不透出」原则不解析。
 type dynModelEntry struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
@@ -1140,7 +1184,20 @@ type dynModelEntry struct {
 	SupportsReason  bool     `json:"supportsReasoning"`
 	SupportsTool    bool     `json:"supportsToolCall"`
 	OnlyReasoning   bool     `json:"onlyReasoning"`
-	Reasoning       struct {
+	// DisabledMultimodal 上游显式关闭多模态（实测 hunyuan-2.0-thinking=true）。
+	// 优先级高于 SupportsImages：显式否认压过隐含肯定（见 ModelAttachments）。
+	DisabledMultimodal bool `json:"disabledMultimodal"`
+	// ContextWindow 上游的上下文窗口档位声明（实测带 defaultLength + supportedLengths）。
+	// 与 MaxInputTokens 并列：MaxInputTokens 是当前生效上限，ContextWindow 是可选档位表。
+	// 仅透出 defaultLength；supportedLengths 是客户端切换档位用的列表，/v1/models 不需要。
+	ContextWindow struct {
+		DefaultLength    int64   `json:"defaultLength"`
+		SupportedLengths []int64 `json:"supportedLengths"`
+	} `json:"contextWindow"`
+	// Summary 顶层 reasoning 摘要模式（实测 kimi-k2.8-preview 带 "summary":"auto"，
+	// 与 reasoning.summary 同值）；reasoning 段缺失时按此回落。
+	Summary   string `json:"summary"`
+	Reasoning struct {
 		Effort             string   `json:"effort"`
 		Summary            string   `json:"summary"`
 		DefaultEffort      string   `json:"defaultEffort"`
@@ -1153,6 +1210,10 @@ type dynModelEntry struct {
 // CN FetchModels 与 global 探测共用，杜绝两域映射漂移）。
 func (m dynModelEntry) modelInfo() ModelInfo {
 	rate, kind := creditRate(m.ID, m.Credits)
+	summary := m.Reasoning.Summary
+	if summary == "" {
+		summary = m.Summary // reasoning 段缺失时回落顶层 summary（实测两处同值）
+	}
 	return ModelInfo{
 		ID:                m.ID,
 		Name:              m.Name,
@@ -1171,7 +1232,15 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 		OnlyReasoning:     m.OnlyReasoning,
 		MaxAllowedSize:    m.MaxAllowedSize,
 		ReasoningEffort:   m.Reasoning.Effort,
-		ReasoningSummary:  m.Reasoning.Summary,
+		ReasoningSummary:  summary,
+		// 本次新增：显式多模态否认 + 上下文档位声明 + 分类。
+		DisabledMultimodal:  m.DisabledMultimodal,
+		ContextWindowTiers:  append([]int64{}, m.ContextWindow.SupportedLengths...),
+		DefaultLength:       m.ContextWindow.DefaultLength,
+		Kind:                ClassifyModel(m.ID, m.Tags, m.MaxOutputTokens),
+		RouterTier:          RouterTierName(m.ID),
+		Attachments:         ModelAttachments(m.Tags, m.SupportsImages, m.DisabledMultimodal),
+		SupportsAttachments: SupportsAttachments(m.Tags, m.SupportsImages, m.DisabledMultimodal),
 		// 本分支保留：credit 倍率解析（catalog/admin 展示）。
 		CreditsLabel:       m.Credits,
 		CreditMultiplier:   rate,
@@ -1205,27 +1274,46 @@ func (c *Client) modelsPath(a *auth.Auth) string {
 	return cnModelsPath
 }
 
-// nonChatModel 判定是否非对话模型（应从模型列表过滤掉）。
-// 来源：harness buddy.ts:547-555。三类规则：
+// tinyOutputTokens tiny 输出阈值：maxOutputTokens 不大于它即非对话模型。
+// （历史值 256，来源 harness buddy.ts:547-555；常量化为分类模块与过滤共用的单一来源。）
+const tinyOutputTokens = 256
+
+// isNonChatID 判定模型 id 是否为非对话专用模型（只按 id 前缀，不含 tags/输出长度）。
+// 三类规则（来源：harness buddy.ts:547-555）：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
-//   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
-func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
+func isNonChatID(id string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
 		if strings.HasPrefix(id, p) {
 			return true
 		}
 	}
-	if maxOutputTokens > 0 && maxOutputTokens <= 256 {
+	return false
+}
+
+// nonChatModel 判定是否应从**模型目录**中剔除（本网关完全无法服务的条目）：
+//   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
+//   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
+//
+// ---- 为什么图像/视频模型**不在**剔除之列（本次修正）----
+//
+// 旧实现把 tags 含 text-to-image 的条目也挡掉，理由是「图片生成模型，非本网关用途」。
+// 该理由在本网关提供 /v1/images/* 之后**已经失效**：图像模型现在有专用入口，
+// 若仍把它们挡在目录外，客户端就永远发现不了它们（/v1/models 是唯一的发现渠道），
+// 专用接口等于形同虚设——功能上线即死。
+//
+// 现在的口径：图像/视频模型**进目录**并带 kind=image/video 标记，由客户端按 kind
+// 路由到 /v1/images/*；它们只是**不参与对话**（会被上游按 11102/11133 拒绝，网关侧
+// 也给了本地拦截，见 server 的 chat 入口守卫）。非对话专用模型（补全/NES/tiny）
+// 则确实完全没有入口，继续剔除。
+//
+// 与 model_kind.go 的 ClassifyModel 的关系：本函数是**目录准入谓词**，
+// ClassifyModel 是**分类函数**。两者共用同一批客观信号。
+func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
+	if isNonChatID(id) {
 		return true
 	}
-	for _, t := range tags {
-		if t == "text-to-image" {
-			return true
-		}
-	}
-	return false
+	return maxOutputTokens > 0 && maxOutputTokens <= tinyOutputTokens
 }
 
 // FetchModels 调上游动态模型接口（CN 侧；global 账号按 modelsPath 走 /v2，v3 补充

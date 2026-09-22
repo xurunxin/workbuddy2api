@@ -120,6 +120,11 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/responses/{response_id}", h.withAuth(h.getResponse))
 	h.mux.HandleFunc("DELETE /v1/responses/{response_id}", h.withAuth(h.deleteResponse))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// 图像模型专用入口（任务书 image-api）：上游的图像模型不是对话模型，走
+	// /v1/chat/completions 必被 11102/11133 拒绝。这两个端点让 coding agent 能像调
+	// chat 一样通过账号池调用它们（同一套选号/冷却/计费链路，见 images.go 文件头）。
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(h.imagesEdits))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
@@ -246,11 +251,42 @@ const (
 )
 
 // models 返回模型列表：纯动态（缓存 1h），失败/无号返回空列表（无静态兜底）。
+//
+// 响应形态（零回归 + 分组键）：
+//   - data：OpenAI 兼容的**全量**条目（含 chat / router / image / video 各类，每条带
+//     kind 字段）。保持全量是为了兼容既有客户端（按 id 直接选模型的工具链不会因为
+//     分组而找不到模型），分类信息由 kind 字段承载。
+//   - routing_models：**自动路由档位单列**（kind=router：auto / 快速 / 均衡 / 极致 等）。
+//     这些是上游按任务自动挑模型的虚拟档位，不是具体模型，用户明确要求不与普通模型混列。
+//   - media_models：图像/视频专用模型单列（kind=image / video），它们的服务入口是
+//     /v1/images/generations 与 /v1/images/edits，不是 /v1/chat/completions。
+//
+// 分组键是 data 的**子集投影**（同一批条目对象，不复制字段口径），客户端读哪一侧都
+// 不会得到互相矛盾的信息。空组恒为 []（不省略键），客户端无需判 null。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	data := h.modelList()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   h.modelList(),
+		"object":         "list",
+		"data":           data,
+		"routing_models": filterModelEntries(data, upstream.KindRouter),
+		"media_models":   filterModelEntries(data, upstream.KindImage, upstream.KindVideo),
 	})
+}
+
+// filterModelEntries 从模型条目里挑出 kind 属于任一给定分类的子集（保持原序）。
+// 恒返回非 nil 切片：JSON 序列化为 [] 而非 null（客户端免判空）。
+func filterModelEntries(data []map[string]any, kinds ...upstream.ModelKind) []map[string]any {
+	out := make([]map[string]any, 0)
+	for _, entry := range data {
+		kind, _ := entry["kind"].(string)
+		for _, want := range kinds {
+			if kind == string(want) {
+				out = append(out, entry)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // globalModels 国际版（global realm）模型名名单（PLAN §7.2 附录 21 名）——已删。
@@ -268,6 +304,20 @@ func fmtCreditsPrefix(raw string) string {
 		return ""
 	}
 	return "[" + s + " credit]"
+}
+
+// remoteContext 取模型条目对查找链「第 1 级（上游权威值）」的贡献。
+//
+// 优先 maxInputTokens（ContextWindow，当前生效上限）；为零时回落上游
+// contextWindow.defaultLength（实测 hy4-preview 等条目同时下发两者：maxInputTokens=
+// 1000000、contextWindow.defaultLength=300000——defaultLength 是**客户端默认档**而非
+// 硬上限，只在 maxInputTokens 缺失时才作为可用信号，避免把默认档当上限压低）。
+// 两者皆零 → 返回 0，交查找链后续层级（种子表 → model.json → models.dev → 1M）。
+func remoteContext(mi upstream.ModelInfo) int64 {
+	if mi.ContextWindow > 0 {
+		return mi.ContextWindow
+	}
+	return mi.DefaultLength
 }
 
 // applyModelInfoFields 把上游模型对象全字段（ModelInfo）按「空值省略」写出规则
@@ -322,6 +372,34 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	if mi.ReasoningSummary != "" {
 		entry["reasoning_summary"] = mi.ReasoningSummary
 	}
+	// ---- 本次新增：分类 + 附件能力（任务书 model-catalog-verify / model-attachments）----
+	// kind 恒透出（非空，chat 是缺省类），驱动客户端的模型选择器分组：
+	// router = 自动路由档位（auto/快速/均衡/极致），image/video = 专用媒体模型，
+	// chat = 普通对话模型。coding agent 据此把档位单列、图像模型走 /v1/images/*。
+	if mi.Kind != "" {
+		entry["kind"] = string(mi.Kind)
+	}
+	if mi.RouterTier != "" {
+		entry["router_tier"] = mi.RouterTier // 档位中文名（自动/快速/均衡/极致）
+	}
+	// 附件能力：attachments 空则整体省略（未知不编造）；supports_attachments 是
+	// 其布尔等价，恒写（false 也是有效信息：该模型不接受附件）。
+	if len(mi.Attachments) > 0 {
+		entry["attachments"] = mi.Attachments
+	}
+	entry["supports_attachments"] = mi.SupportsAttachments
+	if mi.DisabledMultimodal {
+		entry["disabled_multimodal"] = true // 上游显式关闭多模态（压过 supports_images）
+	}
+	// 上下文窗口档位声明（上游 contextWindow）：defaultLength 与 supportedLengths。
+	// 只在 maxInputTokens 缺失时才用 defaultLength 兜 context_length（见调用方），
+	// 这里原样透出供客户端展示可选档位。
+	if mi.DefaultLength > 0 {
+		entry["default_length"] = mi.DefaultLength
+	}
+	if len(mi.ContextWindowTiers) > 0 {
+		entry["context_window_tiers"] = mi.ContextWindowTiers
+	}
 	return entry
 }
 
@@ -333,9 +411,9 @@ func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{
-			"id":                "cn:" + mi.ID,
-			"object":            "model",
-			"created":           1753600000,
+			"id":       "cn:" + mi.ID,
+			"object":   "model",
+			"created":  1753600000,
 			"owned_by": "workbuddy",
 		}
 		// context_length / max_output_tokens 四级查找（upstream.context_catalog +
@@ -344,7 +422,7 @@ func (h *Handler) modelList() []map[string]any {
 		// 拉到后写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
+		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, remoteContext(mi), h.cfg.Upstream.HTTP)
 		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
 			entry["max_output_tokens"] = mo
 		}
@@ -389,7 +467,16 @@ func (h *Handler) modelList() []map[string]any {
 			var remoteCtx, remoteOut int64
 			if mi, ok := globalInfos[id]; ok {
 				entry = applyModelInfoFields(entry, mi)
-				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
+				remoteCtx, remoteOut = remoteContext(mi), mi.MaxTokens
+			} else {
+				// 裸 ID 条目（窄表探测 / 富条目缺失）：字段不编造，但**分类仍要给出**——
+				// 自动路由档位按 id 白名单可判（auto/fast-model/... ），客户端据此单列，
+				// 不会把档位混进普通模型。其余一律 chat（未知按对话模型服务）。
+				entry["kind"] = string(upstream.ClassifyModel(id, nil, 0))
+				if tier := upstream.RouterTierName(id); tier != "" {
+					entry["router_tier"] = tier
+				}
+				entry["supports_attachments"] = false // 无富条目 → 附件能力未知，保守 false
 			}
 			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
 			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
@@ -524,8 +611,49 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	realm, bareModel := resolveModel(peek.Model)
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	// 注意：本行必须在下方「图像/视频模型误投」守卫**之前**——守卫也是一条请求出口，
+	// 同样要留一行日志（否则客户端反复误投时运维看不到任何痕迹）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	defer st.done()
+
+	// 图像/视频模型误投对话入口 → 本地明确拒绝 + 指路专用接口。
+	//
+	// 为什么要本地拦截而不是交给上游：图像模型现在**在目录里**（否则客户端发现不了
+	// 它们，见 upstream.nonChatModel 注释），客户端一不留神就会把它们当对话模型发过来；
+	// 让上游用一个含糊的 400（11102/11133 参数错误）打发客户端，排查成本很高。
+	// 这里提前给出可操作的指向（换模型 / 改走 /v1/images/*），语义与 hints 一致。
+	// 不罚账号：这是请求选错入口，与账号健康无关（与 ErrPromptTooLong 同哲学）。
+	if kind := h.modelKindOf(bareModel); kind == upstream.KindImage || kind == upstream.KindVideo {
+		// 冠词按元音开头选 an（image/video 家族里 image 需 an，video 用 a）——
+		// hint 是给客户端读的英文句子，语法错会显得不专业。
+		article := "a "
+		if kind == upstream.KindImage {
+			article = "an "
+		}
+		hint := "model " + bareModel + " is " + article + string(kind) + " model and cannot be used on the chat endpoint"
+		switch kind {
+		case upstream.KindVideo:
+			// 视频模型本网关暂无入口。
+			hint += "; this gateway has no endpoint for it yet, pick a chat model from /v1/models"
+		default:
+			// 图像模型：给出精确端点（目录缓存命中时可分辨图生图/文生图）；
+			// 缓存冷（tags 未知）时**并列给出两个端点**——只报一个可能在图生图上
+			// 指错路（把编辑请求导去 generations），列全比猜准更可靠。
+			if edit, known := h.imageEditKind(bareModel); known {
+				if edit {
+					hint += "; use /v1/images/edits instead (see /v1/models media_models)"
+				} else {
+					hint += "; use /v1/images/generations instead (see /v1/models media_models)"
+				}
+			} else {
+				hint += "; use /v1/images/generations (text-to-image) or /v1/images/edits (image-to-image) — see /v1/models media_models"
+			}
+		}
+		st.status = http.StatusBadRequest
+		writeOpenAIErrorHint(w, http.StatusBadRequest, "not_a_chat_model",
+			"model "+bareModel+" is not a chat model", hint)
+		return
+	}
 
 	tried := map[string]bool{}
 	var lastErr error

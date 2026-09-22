@@ -147,6 +147,10 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
+	// 图像模型（text-to-image / image-to-image）上游端点路径覆盖；空 = 内置默认
+	// （/v2/images/{generations,edits}，已实测确认，见 internal/upstream/images.go）。
+	up.ImageGeneratePath = cfg.Upstream.ImageGeneratePath
+	up.ImageEditPath = cfg.Upstream.ImageEditPath
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:                p,

@@ -17,6 +17,7 @@ const failureCooldown = time.Minute
 
 type View struct {
 	AccountUID string               `json:"account_uid"`
+	Realm      string               `json:"realm"`
 	Source     string               `json:"source"`
 	FetchedAt  *time.Time           `json:"fetched_at"`
 	ExpiresAt  *time.Time           `json:"expires_at"`
@@ -44,11 +45,18 @@ func New(up *upstream.Client) *Service {
 	return &Service{up: up, entries: make(map[string]*entry)}
 }
 
+// snapshot 返回凭证的脱离锁拷贝（auth.Auth.Snapshot）。
+//
+// 历史实现手工构造 `&Auth{UID, Domain, EnterpriseID, AccessToken, RefreshToken,
+// ExpiresAt}`，**丢掉了未导出的 realm** → Realm() 退化为按 domain 推断：显式
+// realm=global 但 domain 为 cn 的账号（ResolveRealm 明确支持的合法组合）会被判成
+// cn，模型目录按 CN 上游拉取却挂在 global 账号名下——正是「国际区模型混入」的
+// 一类根因。统一改走 Snapshot 后 realm/DeviceToken 一并保留。
 func snapshot(a *auth.Auth) *auth.Auth {
-	a.Lock()
-	defer a.Unlock()
-	return &auth.Auth{UID: a.UID, Domain: a.Domain, EnterpriseID: a.EnterpriseID,
-		AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt}
+	if a == nil {
+		return nil
+	}
+	return a.Snapshot()
 }
 
 // Get returns a cached snapshot, or refreshes on expiry/explicit request. A new
@@ -107,8 +115,15 @@ func (s *Service) Get(ctx context.Context, a *auth.Auth, force bool) (View, erro
 	return e.view(copy.UID, "upstream"), nil
 }
 
+// view 组装对外视图。realm 取账号**当前**的 Realm()（而非拉取时冻结值）：
+// 账号 realm 可被逃生门或重新授权改写，展示层应反映当下事实，避免「标记 cn 却
+// 实际走 global 端点」的陈旧标签。账号为 nil（防御分支）时空串。
 func (e *entry) view(uid, source string) View {
-	v := View{AccountUID: uid, Source: source, Stale: source == "stale", Models: make([]upstream.ModelInfo, 0, len(e.models)), Error: e.message}
+	realm := ""
+	if e.account != nil {
+		realm = e.account.Realm()
+	}
+	v := View{AccountUID: uid, Realm: realm, Source: source, Stale: source == "stale", Models: make([]upstream.ModelInfo, 0, len(e.models)), Error: e.message}
 	if len(e.models) == 0 {
 		v.Source = "unavailable"
 		return v
@@ -118,6 +133,8 @@ func (e *entry) view(uid, source string) View {
 	for _, m := range e.models {
 		m.Efforts = append([]string{}, m.Efforts...)
 		m.Tags = append([]string{}, m.Tags...)
+		m.Attachments = append([]string{}, m.Attachments...)
+		m.ContextWindowTiers = append([]int64{}, m.ContextWindowTiers...)
 		if m.CreditMultiplier != nil {
 			n := *m.CreditMultiplier
 			m.CreditMultiplier = &n

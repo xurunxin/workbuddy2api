@@ -194,9 +194,11 @@ docker compose -f docker-compose.yml -f docker-compose.bind.yml up -d --build
 
 ### 模型选择与积分倍率
 
-「模型与积分」页按所选账号查询官方已授权的 CLI 模型目录，展示准确的请求 `model` ID、显示名称、积分倍率、输入 / 输出上限、图片 / 工具 / 推理能力和官方标签。可搜索、按倍率排序、选择模型并复制 ID 或 Responses / Chat Completions 请求示例；选择仅用于生成客户端配置，不改变账号池路由或网关默认模型。
+「模型与积分」页按所选账号查询官方已授权的 CLI 模型目录，展示准确的请求 `model` ID、显示名称、**分类**、积分倍率、输入 / 输出上限、附件 / 工具 / 推理能力和官方标签。可搜索、按分类筛选、按倍率排序、选择模型并复制 ID 或请求示例（图像模型自动给出 `/v1/images/*` 示例）；选择仅用于生成客户端配置，不改变账号池路由或网关默认模型。
 
-目录来自 `/console/enterprises/personal/models` 的 `agents[name=cli].models`，按 ID 关联模型信息并排除已禁用项。缓存按账号隔离，有效期 15 分钟，手动刷新立即查询；失败时保留旧快照并标记过期与查询错误，无快照时明确报错。`/v1/models` 共享此目录，并返回 `credit_multiplier`、`credit_type`、`credits_label` 及 `source` / `stale` 来源信息；该兼容 API 无目录时仍提供标记为 `source: static` 的历史回退列表，其倍率为未知，不能视为当前账号已验证可用。
+页面顶部的**域徽标**明确标注当前账号属于中国区（`cn`，目录来自 `codebuddy.cn` 上游）还是国际区（`global`，目录来自 `workbuddy.ai` 上游）——两区模型分开拉取、分开展示，不混为一谈。模型表按分类分组：普通对话模型为主体，**自动路由档位**（快速 / 均衡 / 极致）与**图像 / 视频模型**各自成组、默认折叠，需展开查看。
+
+目录来自 `/console/enterprises/personal/models`（CN）或 `/v2/enterprises/personal/models` + `/v3/config`（global）的 `agents[name=cli].models`，按 ID 关联模型信息并排除已禁用项与非对话条目（含图像 / 视频模型——它们不进对话目录，但仍会以 `kind=image/video` 出现在 `media_models` 分组供客户端调用专用接口）。缓存按账号隔离，有效期 15 分钟，手动刷新立即查询；失败时保留旧快照并标记过期与查询错误，无快照时明确报错。`/v1/models` 共享此目录，并返回 `credit_multiplier`、`credit_type`、`credits_label` 及 `source` / `stale` 来源信息；该兼容 API 无目录时仍提供标记为 `source: static` 的历史回退列表，其倍率为未知，不能视为当前账号已验证可用。
 
 根据[官方积分规则](https://www.codebuddy.cn/docs/ide/Account/credits)与[WorkBuddy 模型说明](https://www.codebuddy.cn/docs/workbuddyapp/features/Model)，`×1.00` 表示相对消耗基数，`×0.25` 为相对倍率，**不代表每次请求扣 0.25 积分**。实际扣分还取决于输入 / 输出 token、模型定价与任务复杂度；官方未公开统一的 token 到积分换算公式。Auto 为动态选择，缺失倍率显示未知；`×0.00` 与限时优惠标签按上游原样展示，活动可能变化。模型选择和目录刷新不会执行模型生成。
 
@@ -366,6 +368,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
+| `upstream.image_generate_path` | `/v2/images/generations` | 图像模型文生图的上游端点路径（不含 base，base 按账号 realm 切）。默认值已实测确认；仅在**上游改路径**时才需覆盖 |
+| `upstream.image_edit_path` | `/v2/images/edits` | 图像模型图生图 / 图像编辑的上游端点路径，同上 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
@@ -515,7 +519,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式 / 非流式；请求体上限 `server.max_body_mb`（默认 8 MB） |
 | `POST /v1/responses` | 同上 | Responses 文本、函数调用、流式 / 非流式、有限内存续接 |
 | `GET /v1/responses/{id}` / `DELETE /v1/responses/{id}` | 同上 | 查询 / 删除未过期的已保存响应 |
-| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
+| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存）。每条带 `kind` 分类与附件能力；另有 `routing_models` / `media_models` 分组键（见下「模型列表与分类」） |
+| `POST /v1/images/generations` | 同上 | 图像模型**文生图**（`hunyuan-image-alpha` 等）。走同一账号池与积分；`model` 支持 `[cn:\|global:]` 前缀（见下「图像与视频模型」） |
+| `POST /v1/images/edits` | 同上 | 图像模型**图生图 / 图像编辑**（`hunyuan-image-alpha-edit` 等）。`image` 必填（http(s) URL 或 `data:image/...;base64,`） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分 / 冷却 / 熔断 / 在途 / 粘性；disabled 账号透出 `disabled_reason`） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 | `GET /livez` | 无 | 进程存活检查，恒 200，不要求已添加账号；用于容器 HEALTHCHECK |
@@ -539,6 +545,67 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
 - 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
 
+### 模型列表与分类
+
+`GET /v1/models` 的上游目录里混着四类条目，网关按**上游客观信号**（id / `tags` / `supportsImages` / `disabledMultimodal`）分类，分类结果透出在每条 `kind` 字段上：
+
+| `kind` | 含义 | 服务入口 |
+|---|---|---|
+| `chat` | 普通对话模型（含多模态对话、推理模型） | `/v1/chat/completions`、`/v1/responses` |
+| `router` | **自动路由档位**（`auto` / `fast-model` 快速 / `balanced-model` 均衡 / `deep-model` 极致 等）：上游按任务自动挑模型的虚拟档位，不是具体模型 | 同 `chat`（档位也是对话模型 id） |
+| `image` | 图像模型（`tags` 含 `text-to-image` / `image-to-image`） | `/v1/images/generations`、`/v1/images/edits` |
+| `video` | 视频模型（`text-to-video` / `image-to-video`，如可灵 `kling-*`） | 本网关暂无独立入口，仅分类透出 |
+| `completion` | 代码补全 / NES 等非对话专用模型（`completion-*` / `codewise-*` / `nes-*` 前缀、`maxOutputTokens ≤ 256`） | **不进目录**（网关无任何入口可服务它们） |
+
+> **图像 / 视频模型留在目录里**并带 `kind` 标记。目录是客户端发现模型的**唯一**渠道——把它们挡在目录外，`/v1/images/*` 就永远无从被发现（专用接口形同虚设）。它们只是**不参与对话**：误投 `/v1/chat/completions` 时网关在**本地**返回 `400 not_a_chat_model` + `gateway_hint` 指路专用端点，不打上游、不罚账号（比让上游回一个含糊的 `11102`/`11133` 参数错误可诊断得多）。该守卫只读目录缓存、**绝不发起上游调用**（chat 热路径不因它多打一次模型接口）。
+
+响应同时提供两个**分组键**（`data` 的子集投影，条目对象与 `data` 完全一致）：
+
+```jsonc
+{
+  "object": "list",
+  "data": [ /* 全量条目，每条带 kind（保持 OpenAI 兼容：按 id 选模型的客户端不会找不到模型） */ ],
+  "routing_models": [ /* 仅 kind=router：自动路由档位单列，不与普通模型混列 */ ],
+  "media_models":   [ /* 仅 kind=image/video：专用媒体模型单列 */ ]
+}
+```
+
+空组恒为 `[]`（不省略键）。控制台「模型与积分」页按同一分类分组展示（档位 / 图像 / 视频各自成组，默认折叠），并提供分类筛选。
+
+**附件能力**：每条模型带 `attachments`（入站附件类型，当前只可能是 `["image"]`）与 `supports_attachments` 布尔。判定只依据上游下发的信号——`supportsImages=true`、`tags` 含 `image-to-image`（图生图模型以输入图为必需入参）、`disabledMultimodal=true`（上游**显式**关闭多模态，压过 `supportsImages`）。上游未声明的模型整体省略 `attachments` 并报 `supports_attachments: false`——**未知不编造**。
+
+**国际区模型不混入中国区**：目录按账号 `realm` 分开拉取（CN 走 `/console/...`，global 走 `/v2/...` + `/v3/config`），输出分别加 `cn:` / `global:` 前缀；两区同名模型（如 `glm-5.2`）各自独立成条、互不覆盖。两区探测路径共用同一套 `nonChatModel` 目录准入口径（只剔除网关无入口的条目，媒体模型保留）。
+
+### 图像与视频模型
+
+上游目录里的图像模型（`hunyuan-image-alpha` 文生图、`hunyuan-image-alpha-edit` 图生图、`hunyuan-image-v3.0-art` 等）**不是对话模型**：送进 `/v1/chat/completions` 会被上游按 `11102` / `11133` 拒绝。它们与对话模型共享同一个账号池和积分（实测 `hunyuan-image-v3.0-art` 的 `credits=x5.00`），所以正确形态是「列出来 + 给它自己的入口」：
+
+```bash
+# 文生图（kind=image 的模型）
+curl http://localhost:7863/v1/images/generations \
+  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
+  -d '{"model":"hunyuan-image-alpha","prompt":"一只在屋顶上看星星的猫"}'
+
+# 图生图 / 图像编辑（tags 含 image-to-image 的模型）
+curl http://localhost:7863/v1/images/edits \
+  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
+  -d '{"model":"hunyuan-image-alpha-edit","prompt":"把背景换成雪山","image":"https://example.com/in.png"}'
+```
+
+请求字段：`model`（必填，支持 `cn:` / `global:` 前缀）、`prompt`（必填）、`image`（`image_url` 亦可）、`n`、`size`、`seed`。响应采用 OpenAI Images 形状（`created` + `data[].b64_json` / `url`）。
+
+`image` 字段**单字符串与字符串数组都接受**（网关统一归一成数组出站）——上游要求数组（`EditImageRequest.image` 是 `[]string`），而 OpenAI 惯例是单字符串，两种客户端都不得不用改动。每项支持 https URL 与 `data:image/...;base64,`。
+
+这两个端点与 chat **完全同构**地走账号池：realm 过滤选号、在途名额、软冷却、熔断、WAF IP fail-fast、成本账本、错误分类与上游原文透传全部复用。非图像模型打到这里会被本地以 `400 not_an_image_model` + `gateway_hint` 指路 `/v1/models`；图像模型打进 chat 则由本地 `400 not_a_chat_model` 拦下并指路专用端点（都在本地完成，不打上游、不罚账号）。
+
+> **上游端点与 schema 已实测确认**（2026-09-18 真机联调）：
+>
+> - 路径：`/v2/images/generations`（文生图）、`/v2/images/edits`（图生图）——真机调用分别返回了生成结果与上游业务错误，证明路径正确；
+> - 请求体：上游 `EditImageRequest.image` 的 Go 类型是 **`[]string`**（多图输入）。字符串形态会被上游以 `11101 Unmarshal create image params failed ... cannot unmarshal string into Go struct field EditImageRequest.image of type []string` 拒绝——网关对外兼容单字符串、对内归一成数组，已规避；
+> - 响应：上游返回 `{"created":…,"data":[{"url":"https://…cos.ap-beijing.myqcloud.com/…png?q-sign-…"}]}`（带签名的临时 URL），与网关透出的 OpenAI Images 形状一致。
+>
+> 路径仍可用配置覆盖（`upstream.image_generate_path` / `image_edit_path`）以备上游变更，但**默认值已非推测**，无需按实测调整。
+
 ### 上游端点
 
 上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档；路径及 Host 以代码内常量为准（见文末出处表）。两类 base：
@@ -549,7 +616,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 相对路径（绝对路径见出处表） | 方法 | 用途 |
 |---|---|---|
 | `chat/completions` | POST | 聊天补全（SSE） |
-| `console/enterprises/personal/models` | GET | 动态模型列表 |
+| `console/enterprises/personal/models` | GET | 动态模型列表（CN） |
+| `v2/enterprises/personal/models` | GET | 动态模型列表（global 企业端点，补 `/v3/config` 缺项） |
+| `v3/config` | GET | 产品配置 + 模型目录（CN/global 通用，模型目录主路） |
+| `images/generations` | POST | 图像模型文生图（已实测） |
+| `images/edits` | POST | 图像模型图生图（已实测；`image` 为 `[]string`） |
 | `plugin/auth/token/refresh` | POST | token 刷新 |
 | `billing/meter/daily-checkin` | POST | 每日签到 |
 | `billing/meter/get-user-resource` | POST | 余额查询 |

@@ -16,21 +16,34 @@ func TestContextWindowListingRemoteWins(t *testing.T) {
 
 // TestContextWindowListingKnowledgeTable 知识表命中：远端零值 → 按模型补齐真实量级，
 // 不再透出假 131072。
+//
+// 取值口径 = 2026-09-18 核对的本机 WorkBuddy 桌面端 /v3/config 原始响应缓存
+// （13 份快照，按 agents[name=cli].models 取账号实际可选模型）。本轮核对纠正了
+// 多个历史取值，见 context_catalog.go 文件头「取值口径」。
 func TestContextWindowListingKnowledgeTable(t *testing.T) {
 	cases := []struct {
 		model, source string
 		want          int64
 	}{
-		{"glm-5.2", "fork 实测 CN 1M", 1000000},
-		{"glm-5.1", "fork 实测 200K", 200000},
-		{"kimi-k2.7", "fork 实测 256K", 256000},
-		{"minimax-m3", "fork 实测 512K", 512000},
-		{"deepseek-v4-pro", "fork 实测 1M", 1000000},
-		{"deepseek-v4.1-flash", "实测外推 + models.dev", 1000000},
-		{"hy3", "fork 实测 192K", 192000},
+		// 上游实测（/v3/config 原始响应）。
+		{"glm-5.2", "实测 CN 1M", 1000000},
+		{"glm-5.1", "实测 200K", 200000},
+		{"kimi-k2.7", "实测 256K", 256000},
+		{"minimax-m3", "实测 512K", 512000},
+		{"deepseek-v4-pro", "实测 1M", 1000000},
+		{"deepseek-v4.1-flash", "实测 1M", 1000000},
+		{"hy3", "实测 192K", 192000},
+		// 本轮纠正的历史错误取值（回归锚点）。
+		{"kimi-k3-1", "实测 1M（旧表误用不存在的 id kimi-k3）", 1000000},
+		{"kimi-k2.5", "实测 256K（旧表 164000 系 global 外推）", 256000},
+		{"hy3-preview", "实测 192K（旧表 262144）", 192000},
+		{"kimi-k2.8-preview", "实测 1000000（旧表 1048576 二进制口径）", 1000000},
+		// global 域（无法直测，models.dev 共识）。
 		{"gpt-6-astra", "models.dev", 1050000},
 		{"gpt-5.3-codex", "models.dev", 400000},
-		{"auto", "fork global 外推", 168000},
+		// 自动路由档位。
+		{"auto", "实测 168K", 168000},
+		{"fast-model", "实测 300K", 300000},
 	}
 	for _, c := range cases {
 		if got := ContextWindowListing(c.model, 0); got != c.want {
@@ -57,13 +70,16 @@ func TestMaxOutputTokensListing(t *testing.T) {
 	if got, ok := MaxOutputTokensListing("glm-5.2", 64000); !ok || got != 64000 {
 		t.Errorf("remote: max_output_tokens=%d,%v want 64000,true", got, ok)
 	}
-	// 知识表命中。
-	if got, ok := MaxOutputTokensListing("deepseek-v4-pro", 0); !ok || got != 384000 {
-		t.Errorf("table: max_output_tokens=%d,%v want 384000,true", got, ok)
+	// 知识表命中（实测值；旧表误填 models.dev 的 384000）。
+	if got, ok := MaxOutputTokensListing("deepseek-v4-pro", 0); !ok || got != 128000 {
+		t.Errorf("table: max_output_tokens=%d,%v want 128000,true", got, ok)
 	}
-	// 知识表条目但输出上限未知（kimi-k2.8-preview/auto）→ 省略。
-	if got, ok := MaxOutputTokensListing("auto", 0); ok || got != 0 {
-		t.Errorf("auto: max_output_tokens=%d,%v want 0,false (unknown → omit)", got, ok)
+	// 本轮纠正：GLM/Kimi 的上游实测输出上限远低于 models.dev 收录值。
+	if got, ok := MaxOutputTokensListing("glm-5.1", 0); !ok || got != 48000 {
+		t.Errorf("glm-5.1: max_output_tokens=%d,%v want 48000,true (实测)", got, ok)
+	}
+	if got, ok := MaxOutputTokensListing("kimi-k2.6", 0); !ok || got != 32000 {
+		t.Errorf("kimi-k2.6: max_output_tokens=%d,%v want 32000,true (实测，旧表 262144)", got, ok)
 	}
 	// 完全未知 → 省略。
 	if _, ok := MaxOutputTokensListing("totally-unknown-model", 0); ok {

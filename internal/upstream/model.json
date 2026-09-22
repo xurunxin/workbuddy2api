@@ -1,56 +1,117 @@
 {
-  "glm-5.2": {
-    "context_length": 1000000,
-    "max_output_tokens": 131072,
+  "auto": {
+    "context_length": 168000,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
-  "glm-5.1": {
-    "context_length": 200000,
-    "max_output_tokens": 131072,
+  "fast-model": {
+    "context_length": 300000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "balanced-model": {
+    "context_length": 300000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "deep-model": {
+    "context_length": 300000,
+    "max_output_tokens": 48000,
     "source": "seed"
   },
   "glm-5.3": {
     "context_length": 1000000,
-    "max_output_tokens": 131072,
+    "max_output_tokens": 64000,
     "source": "seed"
   },
   "glm-5.3-flash": {
     "context_length": 1000000,
-    "max_output_tokens": 131072,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "glm-5.2": {
+    "context_length": 1000000,
+    "max_output_tokens": 64000,
+    "source": "seed"
+  },
+  "glm-5.1": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "glm-5.0-turbo": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "glm-5.0": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "glm-4.7": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "glm-4.6": {
+    "context_length": 168000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "glm-4.6v": {
+    "context_length": 128000,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
   "glm-5v-turbo": {
     "context_length": 200000,
-    "max_output_tokens": 131072,
+    "max_output_tokens": 64000,
+    "source": "seed"
+  },
+  "kimi-k3-1": {
+    "context_length": 1000000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "kimi-k2.8-preview": {
+    "context_length": 1000000,
+    "max_output_tokens": 64000,
     "source": "seed"
   },
   "kimi-k2.7": {
     "context_length": 256000,
-    "max_output_tokens": 65536,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
   "kimi-k2.6": {
     "context_length": 256000,
-    "max_output_tokens": 262144,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
   "kimi-k2.5": {
-    "context_length": 164000,
-    "max_output_tokens": 262144,
+    "context_length": 256000,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
-  "kimi-k3": {
-    "context_length": 1048576,
-    "max_output_tokens": 131072,
-    "source": "seed"
-  },
-  "kimi-k2.8-preview": {
-    "context_length": 1048576,
+  "kimi-k2-thinking": {
+    "context_length": 256000,
+    "max_output_tokens": 32000,
     "source": "seed"
   },
   "minimax-m3": {
     "context_length": 512000,
-    "max_output_tokens": 512000,
+    "max_output_tokens": 128000,
+    "source": "seed"
+  },
+  "minimax-m2.7": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
+    "source": "seed"
+  },
+  "minimax-m2.5": {
+    "context_length": 200000,
+    "max_output_tokens": 48000,
     "source": "seed"
   },
   "hy3": {
@@ -58,8 +119,13 @@
     "max_output_tokens": 64000,
     "source": "seed"
   },
+  "hy3-x": {
+    "context_length": 192000,
+    "max_output_tokens": 64000,
+    "source": "seed"
+  },
   "hy3-preview": {
-    "context_length": 262144,
+    "context_length": 192000,
     "max_output_tokens": 64000,
     "source": "seed"
   },
@@ -73,19 +139,99 @@
     "max_output_tokens": 64000,
     "source": "seed"
   },
+  "hy4-preview-dev": {
+    "context_length": 1000000,
+    "max_output_tokens": 64000,
+    "source": "seed"
+  },
+  "hunyuan-2.0-instruct": {
+    "context_length": 128000,
+    "max_output_tokens": 16000,
+    "source": "seed"
+  },
+  "hunyuan-2.0-thinking": {
+    "context_length": 128000,
+    "max_output_tokens": 24000,
+    "source": "seed"
+  },
+  "hunyuan-chat": {
+    "context_length": 128000,
+    "max_output_tokens": 8192,
+    "source": "seed"
+  },
   "deepseek-v4-pro": {
     "context_length": 1000000,
-    "max_output_tokens": 384000,
+    "max_output_tokens": 128000,
     "source": "seed"
   },
   "deepseek-v4-flash": {
     "context_length": 1000000,
-    "max_output_tokens": 384000,
+    "max_output_tokens": 50000,
     "source": "seed"
   },
   "deepseek-v4.1-flash": {
     "context_length": 1000000,
-    "max_output_tokens": 384000,
+    "max_output_tokens": 128000,
+    "source": "seed"
+  },
+  "deepseek-v3-2-volc": {
+    "context_length": 96000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "deepseek-v3-1-volc": {
+    "context_length": 96000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "deepseek-v3-1-lkeap": {
+    "context_length": 96000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "deepseek-v3-1": {
+    "context_length": 96000,
+    "max_output_tokens": 32000,
+    "source": "seed"
+  },
+  "deepseek-v3-0324-lkeap": {
+    "context_length": 112000,
+    "max_output_tokens": 16000,
+    "source": "seed"
+  },
+  "deepseek-v3-0324": {
+    "context_length": 96000,
+    "max_output_tokens": 8192,
+    "source": "seed"
+  },
+  "deepseek-r1-0528-lkeap": {
+    "context_length": 96000,
+    "max_output_tokens": 16000,
+    "source": "seed"
+  },
+  "deepseek-r1-0528": {
+    "context_length": 96000,
+    "max_output_tokens": 8192,
+    "source": "seed"
+  },
+  "default-1.1": {
+    "context_length": 200000,
+    "max_output_tokens": 8192,
+    "source": "seed"
+  },
+  "default-1.2": {
+    "context_length": 200000,
+    "max_output_tokens": 24000,
+    "source": "seed"
+  },
+  "kimi-k2-instruct-taiji": {
+    "context_length": 31000,
+    "max_output_tokens": 8192,
+    "source": "seed"
+  },
+  "kimi-k3": {
+    "context_length": 1048576,
+    "max_output_tokens": 131072,
     "source": "seed"
   },
   "gpt-6-astra": {
@@ -126,10 +272,6 @@
   "gemini-3.5-flash": {
     "context_length": 1048576,
     "max_output_tokens": 65536,
-    "source": "seed"
-  },
-  "auto": {
-    "context_length": 168000,
     "source": "seed"
   }
 }

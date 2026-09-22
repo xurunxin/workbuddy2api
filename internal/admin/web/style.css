@@ -533,6 +533,25 @@ textarea {
 .model-source.warning {
   color: #915500;
 }
+/* realm 徽标：明确标注当前目录属于中国区还是国际区账号，两区模型不混为一谈。 */
+.realm-badge {
+  margin-top: 12px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.realm-badge.realm-cn {
+  border-color: #f0c9c0;
+  background: #fff7f5;
+  color: #8a3b26;
+}
+.realm-badge.realm-global {
+  border-color: #bfd7f0;
+  background: #f2f8ff;
+  color: #1d4f8a;
+}
 .models-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.85fr);
@@ -544,7 +563,7 @@ textarea {
   min-width: 0;
 }
 .models-table {
-  min-width: 660px;
+  min-width: 780px;
   table-layout: fixed;
 }
 .models-table th,
@@ -552,11 +571,96 @@ textarea {
   padding: 14px 12px;
   overflow-wrap: anywhere;
 }
-.models-table th:nth-child(1) { width: 28%; }
-.models-table th:nth-child(2) { width: 13%; }
-.models-table th:nth-child(3) { width: 21%; }
-.models-table th:nth-child(4) { width: 24%; }
-.models-table th:nth-child(5) { width: 14%; }
+.models-table th:nth-child(1) { width: 26%; }
+.models-table th:nth-child(2) { width: 12%; }
+.models-table th:nth-child(3) { width: 12%; }
+.models-table th:nth-child(4) { width: 18%; }
+.models-table th:nth-child(5) { width: 20%; }
+.models-table th:nth-child(6) { width: 12%; }
+/* 分组表头行：自动路由档位 / 图像 / 视频等特殊模型各自成组，不与普通模型混列。 */
+.models-table tbody tr.model-group-row {
+  cursor: default;
+}
+.models-table tbody tr.model-group-row:hover td {
+  background: transparent;
+}
+.models-table tbody tr.model-group-row td {
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: #fbfbfd;
+}
+.model-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.model-group-caret {
+  color: var(--muted);
+  font-size: 11px;
+}
+.model-group-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+.model-group-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.model-kind {
+  white-space: nowrap;
+}
+.kind-cell {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+.kind-badge {
+  display: inline-block;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.kind-badge.kind-chat {
+  border-color: #d7d5ef;
+  color: #4a3fa8;
+}
+.kind-badge.kind-router {
+  border-color: #f0d9a8;
+  background: #fffaf0;
+  color: #8a5b00;
+}
+.kind-badge.kind-image {
+  border-color: #b7dcc8;
+  background: #f2fbf6;
+  color: #1c6b45;
+}
+.kind-badge.kind-video {
+  border-color: #c9d7ea;
+  background: #f4f8fd;
+  color: #2c5b8f;
+}
+.kind-badge.kind-completion {
+  border-color: #e2e2e2;
+  background: #fafafa;
+  color: #7a7a7a;
+}
+.kind-tier {
+  color: var(--muted);
+  font-size: 11px;
+}
 #models-table-wrap {
   max-height: 640px;
 }
@@ -1090,9 +1194,12 @@ textarea::selection {
 #usage-view .metric strong { overflow-wrap: anywhere; }
 @media (max-width: 1020px) {
   .usage-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* 模型表在窄屏收窄最小宽度：新增「分类」列后 780px 会在平板宽度撑出横向滚动。 */
+  .models-table { min-width: 640px; }
 }
 @media (max-width: 760px) {
   .usage-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .models-table { min-width: 560px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *,

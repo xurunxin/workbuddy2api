@@ -93,6 +93,15 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+
+		// ImageGeneratePath / ImageEditPath 图像模型（text-to-image / image-to-image）
+		// 的上游端点路径（不含 base，base 按账号 realm 切）。
+		//
+		// 默认值已实测确认（2026-09-18 真机联调：generations 返回真实生成结果、
+		// edits 返回上游业务错误，均证明路径正确）。保留可配仅供上游将来改路径时
+		// 免改代码适配；正常情况下**不需要设置**。
+		ImageGeneratePath string `json:"image_generate_path"`
+		ImageEditPath     string `json:"image_edit_path"`
 	} `json:"upstream"`
 
 	Features struct {

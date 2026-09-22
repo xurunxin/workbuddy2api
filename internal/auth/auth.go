@@ -31,11 +31,11 @@ type Auth struct {
 	//
 	// 命名注记：Go 不允许字段与方法同名，持久化字段用未导出 realm，计算访问器用
 	// 导出的 Realm()（跨包调用全部走方法）。Parse/SaveAtomic/login 在包内读写字段。
-	realm          string
-	UID            string
-	EnterpriseID   string
-	Nickname       string
-	FilePath       string // 来源文件；refresh 后原子写回此处
+	realm        string
+	UID          string
+	EnterpriseID string
+	Nickname     string
+	FilePath     string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
@@ -182,6 +182,38 @@ func (a *Auth) RealmStored() string {
 
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
+
+// Snapshot 返回凭证的**脱离锁的深拷贝**，用于发起上游 RPC（避免读取期间被
+// RefreshToken 并发改写）与跨包传递。
+//
+// 关键在于**保留 realm**：realm 是未导出字段，跨包（catalog / admin）手工构造
+// `&Auth{AccessToken: ..., Domain: ...}` 拷贝会静默丢掉它，Realm() 随后只能按
+// domain 回落推断。对「显式 realm=global + cn domain」这类合法组合（ResolveRealm
+// 明确支持：显式优先于 domain），丢 realm 会让账号被判成 cn → 模型目录/计费走错
+// 域，把中国区结果当成国际区账号的目录（反之亦然）。
+//
+// DeviceToken 一并保留：它参与出站 X-Device-Token 头，掉落会让风控指纹不完整。
+// FilePath 刻意**不复制**：快照只用于读上游，写回必须走原对象（SaveAtomic），
+// 复制 FilePath 会让调用方以为可以拿快照落盘，实际覆盖的是同一个文件却绕过了
+// 原对象的锁。
+func (a *Auth) Snapshot() *Auth {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return &Auth{
+		AccessToken:  a.AccessToken,
+		RefreshToken: a.RefreshToken,
+		ExpiresAt:    a.ExpiresAt,
+		Domain:       a.Domain,
+		realm:        a.realm, // 显式保留：见方法头（跨包拷贝丢 realm 会走错域）
+		UID:          a.UID,
+		EnterpriseID: a.EnterpriseID,
+		Nickname:     a.Nickname,
+		DeviceToken:  a.DeviceToken,
+	}
+}
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。

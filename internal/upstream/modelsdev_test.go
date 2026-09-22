@@ -485,10 +485,10 @@ func TestModelCatalogCorruptFileDegradesToSeed(t *testing.T) {
 	}
 	loadModelCatalogAt(path)
 
-	// 种子表值可用（种子 = 静态表迁移：glm-5.2 → 1M/131072）。
+	// 种子表值可用（种子 = 静态表迁移：glm-5.2 → 1M/64000，上游实测口径）。
 	// 注意：查找链级 2（静态表）本来就会兜住 glm-5.2，这里直接断言级 3 缓存读：
 	e, ok := modelCatalogGet("glm-5.2")
-	if !ok || e.ContextLength != 1000000 || e.MaxOutputTokens != 131072 {
+	if !ok || e.ContextLength != 1000000 || e.MaxOutputTokens != 64000 {
 		t.Errorf("corrupt file must fall back to seed: %+v ok=%v", e, ok)
 	}
 	// 完全未收录模型仍 1M（链路健康）。
@@ -578,7 +578,7 @@ func TestModelCatalogSeedOnFirstStartup(t *testing.T) {
 	SetModelCatalogPath(path) // 惰性加载：首次 get 触发
 
 	e, ok := modelCatalogGet("kimi-k2.6")
-	if !ok || e.ContextLength != 256000 || e.MaxOutputTokens != 262144 {
+	if !ok || e.ContextLength != 256000 || e.MaxOutputTokens != 32000 {
 		t.Errorf("seed entry kimi-k2.6: %+v ok=%v", e, ok)
 	}
 	if e.Source != "seed" {

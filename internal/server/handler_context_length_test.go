@@ -40,12 +40,13 @@ func TestModelListContextLengthThreeLevelLookup(t *testing.T) {
 	if o := byID["cn:dyn-full"]["max_output_tokens"]; o != int64(8192) {
 		t.Errorf("dyn-full max_output_tokens=%v want 8192 (remote wins)", o)
 	}
-	// 2) 知识表命中：glm-5.2 上游零值 → 表值 1M/131072（fork 实测）。
+	// 2) 知识表命中：glm-5.2 上游零值 → 表值 1M/64000（2026-09-18 核对上游实测：
+	// maxOutput 完整档 64000；旧表误填 models.dev 的 131072）。
 	if c := byID["cn:glm-5.2"]["context_length"]; c != int64(1000000) {
 		t.Errorf("glm-5.2 context_length=%v want 1000000 (knowledge table)", c)
 	}
-	if o := byID["cn:glm-5.2"]["max_output_tokens"]; o != int64(131072) {
-		t.Errorf("glm-5.2 max_output_tokens=%v want 131072 (knowledge table)", o)
+	if o := byID["cn:glm-5.2"]["max_output_tokens"]; o != int64(64000) {
+		t.Errorf("glm-5.2 max_output_tokens=%v want 64000 (knowledge table)", o)
 	}
 	// 3) 未知 → 1M 兜底；max_output_tokens 未知省略。
 	if c := byID["cn:never-seen-model"]["context_length"]; c != int64(1000000) {
@@ -54,12 +55,16 @@ func TestModelListContextLengthThreeLevelLookup(t *testing.T) {
 	if _, ok := byID["cn:never-seen-model"]["max_output_tokens"]; ok {
 		t.Error("unknown model max_output_tokens must be omitted")
 	}
-	// 4) 知识表条目但输出上限未知（auto）→ context 走表 168000，输出省略。
+	// 4) 自动路由档位 auto：context 走表 168000、输出 32000（实测），且 kind=router
+	// 让它出现在 routing_models 分组而不与普通模型混列。
 	if c := byID["cn:auto"]["context_length"]; c != int64(168000) {
 		t.Errorf("auto context_length=%v want 168000 (knowledge table)", c)
 	}
-	if _, ok := byID["cn:auto"]["max_output_tokens"]; ok {
-		t.Error("auto max_output_tokens must be omitted (output unknown)")
+	if o := byID["cn:auto"]["max_output_tokens"]; o != int64(32000) {
+		t.Errorf("auto max_output_tokens=%v want 32000 (knowledge table)", o)
+	}
+	if k := byID["cn:auto"]["kind"]; k != string(upstream.KindRouter) {
+		t.Errorf("auto kind=%v want router", k)
 	}
 	// 全表扫描：任何条目都不得再出现 131072 假兜底充当 context_length
 	//（dyn-full 的 65536 等真实值不受影响；本 fixture 无真 131072 值）。

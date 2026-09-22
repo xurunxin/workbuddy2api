@@ -411,6 +411,16 @@
                 <input id="model-search" type="search" placeholder="按名称或 ID 搜索" autocomplete="off" />
               </label>
               <label>
+                分类
+                <select id="model-kind" aria-label="按模型分类筛选">
+                  <option value="all">全部</option>
+                  <option value="chat">对话模型</option>
+                  <option value="router">自动路由档位</option>
+                  <option value="image">图像模型</option>
+                  <option value="video">视频模型</option>
+                </select>
+              </label>
+              <label>
                 倍率排序
                 <select id="model-sort" aria-label="模型倍率排序">
                   <option value="default">默认顺序</option>
@@ -420,6 +430,7 @@
               </label>
             </div>
             <p class="muted">倍率以 ×1.00 为相对基数，不是每次请求的固定扣分。实际消耗还取决于输入 / 输出 Token 和任务复杂度。</p>
+            <div class="realm-badge" id="model-realm" hidden></div>
             <div class="model-source" id="model-source" role="status" aria-live="polite">
               选择账号后读取模型列表。
             </div>
@@ -435,6 +446,7 @@
                   <thead>
                     <tr>
                       <th>模型</th>
+                      <th>分类</th>
                       <th>积分倍率</th>
                       <th>最大输入 / 最大输出</th>
                       <th>能力</th>
@@ -468,6 +480,7 @@
                   <select id="model-example-kind" aria-label="选择请求示例类型">
                     <option value="responses">Responses API</option>
                     <option value="chat">Chat Completions API</option>
+                    <option value="image">Images API（图像模型专用）</option>
                   </select>
                 </label>
                 <button class="mini-button" id="copy-model-example" type="button">复制示例</button>

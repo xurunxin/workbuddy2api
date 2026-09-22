@@ -132,20 +132,39 @@ func TestFetchModelsFiltersTinyOutput(t *testing.T) {
 	}
 }
 
-// TestFetchModelsFiltersTextToImage P2：tags 含 text-to-image 过滤。
-func TestFetchModelsFiltersTextToImage(t *testing.T) {
+// TestFetchModelsKeepsImageModelsWithKind 图像模型**留在目录里**并带 kind=image。
+//
+// 行为变更（本次）：旧实现在这里把 tags 含 text-to-image 的条目过滤掉（当时网关没有
+// 图像入口）。本网关提供 /v1/images/* 后，目录是客户端发现模型的唯一渠道——继续过滤
+// 会让图像模型永不可见、专用接口形同虚设。现在改为「进目录 + kind 标记」，误投对话
+// 入口由 server 侧守卫拦（见 server.TestChatRejectsImageModel）。
+func TestFetchModelsKeepsImageModelsWithKind(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(200, `{"code":0,"data":{"models":[
 			{"id":"img-gen","name":"IMG","maxInputTokens":8192,"maxOutputTokens":8192,"tags":["text-to-image","chat"]},
+			{"id":"img-edit","name":"IMGEDIT","maxInputTokens":8192,"maxOutputTokens":8192,"tags":["image-to-image"]},
 			{"id":"glm-5.2","name":"GLM","maxInputTokens":131072,"maxOutputTokens":8192,"tags":["chat"]}
-		],"agents":[{"name":"cli","models":["img-gen","glm-5.2"]}]}}`), nil
+		],"agents":[{"name":"cli","models":["img-gen","img-edit","glm-5.2"]}]}}`), nil
 	})
 	infos, err := c.FetchModels(authStub())
 	if err != nil {
 		t.Fatalf("fetch models: %v", err)
 	}
-	if len(infos) != 1 || infos[0].ID != "glm-5.2" {
-		t.Fatalf("expected only glm-5.2 (no text-to-image), got %+v", infos)
+	byID := map[string]ModelInfo{}
+	for _, mi := range infos {
+		byID[mi.ID] = mi
+	}
+	if len(infos) != 3 {
+		t.Fatalf("expected all 3 models (media models stay discoverable), got %d: %+v", len(infos), infos)
+	}
+	if got := byID["img-gen"].Kind; got != KindImage {
+		t.Errorf("img-gen kind=%q want image", got)
+	}
+	if got := byID["img-edit"].Kind; got != KindImage {
+		t.Errorf("img-edit kind=%q want image (image-to-image must classify as image)", got)
+	}
+	if got := byID["glm-5.2"].Kind; got != KindChat {
+		t.Errorf("glm-5.2 kind=%q want chat", got)
 	}
 }
 
