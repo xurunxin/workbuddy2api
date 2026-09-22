@@ -401,6 +401,12 @@ tbody tr:last-child td {
   background: #f0f1f3;
   color: #5e6878;
 }
+/* 手动临时停用：与自动禁用在视觉上必须可区分（前者是运维主动摘的，可随时恢复；
+   后者是系统判定坏了，要「复活」）。用琥珀色而非灰色，避免与 disabled 混淆。 */
+.status-badge.manual {
+  background: #fdf0e3;
+  color: #9a4a00;
+}
 .status-detail {
   display: block;
   max-width: 180px;
@@ -409,6 +415,35 @@ tbody tr:last-child td {
   font-size: 11px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+/* 手动摘除原因行：与自动禁用原因（.status-detail）同格并列展示，用不同色区分。 */
+.status-detail.manual-line {
+  color: #9a4a00;
+}
+/* 临时停用原因输入框：与按钮组同排，宽度固定避免撑开 section-head。 */
+.reason-input {
+  border: 1px solid #dce0e7;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: #fff;
+  width: 190px;
+}
+.reason-input:focus {
+  outline: 2px solid var(--indigo);
+  outline-offset: 1px;
+}
+/* 账号页双位状态说明：解释「临时停用」与「已禁用」的区别，放在表单上方。 */
+.pool-note {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #f6f7f9;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 /* 模型级限额（6004）台账行：账号状态格内的逐模型恢复倒计时。 */
 .rate-limited {

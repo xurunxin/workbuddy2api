@@ -139,13 +139,25 @@
               <p>凭证仅保留在服务端。积分查询可能需要数秒。</p>
             </div>
             <div class="button-group">
-              <button class="button secondary" id="batch-credits">
+              <input
+                id="manual-disable-reason"
+                class="reason-input"
+                type="text"
+                maxlength="120"
+                placeholder="临时停用原因（可选）"
+                aria-label="临时停用原因"
+              /><button class="button secondary" id="batch-credits">
                 依次刷新积分</button
               ><button class="button primary" id="oauth-start">
                 添加授权账号
               </button>
             </div>
           </div>
+          <p class="pool-note">
+            「临时停用」只把账号摘出选号池，账号仍留在池内：签到、token 保活与排程照常执行，
+            随时可以「恢复」放回选号。它与系统自动判定的「已禁用」是两个独立的位——
+            自动禁用需要点「复活」才会解除，两个位都清空后账号才回到选号。
+          </p>
           <div class="panel table-panel">
             <div id="accounts-empty" class="empty" hidden>
               <strong>账号池为空</strong>

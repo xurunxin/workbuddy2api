@@ -19,7 +19,15 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
-	Admin     struct {
+	// Admin 内嵌管理控制台（/admin/，internal/admin）的登录配置。
+	//
+	// 命名空间说明：上游在同一 "admin" JSON 对象下另有 enabled 开关（用于
+	// /admin/accounts/{uid}/{disable,enable,revive} 运维端点）。本 fork 把整个
+	// /admin/ 前缀交给控制台，二者同路径无法并存，故按维护决策**统一到控制台**：
+	// 临时停用/恢复/复活改由控制台账号页提供（会话鉴权 + CSRF），不再暴露
+	// api_key 鉴权的运维端点，admin.enabled 一并退役。Config 里必须只有**一个**
+	// Admin 字段——两条支线各自声明同名 `admin` 会让它编译期 redeclared。
+	Admin struct {
 		Password     string `json:"password"`
 		SecureCookie bool   `json:"secure_cookie"`
 	} `json:"admin"`

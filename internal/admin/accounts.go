@@ -3,16 +3,42 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
 )
 
 var safeUID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+// accountActionReason 读可选的 {"reason": "..."} 请求体（临时停用原因，运维留痕用）。
+// 无体 / 非 JSON / 无该字段都回落默认文案——无体是最常见的调用形态（curl / 脚本），
+// 不应因体缺失而拒绝。长度截断到 120 字符，避免超长文本撑爆账号状态展示。
+func accountActionReason(r *http.Request) string {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+	if err != nil || len(raw) == 0 {
+		return "控制台临时停用"
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return "控制台临时停用"
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		return "控制台临时停用"
+	}
+	if runes := []rune(reason); len(runes) > 120 {
+		reason = string(runes[:120])
+	}
+	return reason
+}
 
 func (h *Handler) beginAccount(uid string) bool {
 	h.mu.Lock()
@@ -95,6 +121,32 @@ func (h *Handler) accountAction(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.endAccount(uid)
 	switch action {
+	// ---- 上游运维端点（issue #138/#118）的控制台等价实现 ----------------
+	//
+	// 上游把「临时停用/恢复/复活」开在 /admin/accounts/{uid}/{disable,enable,revive}
+	// 上，用 api_key 鉴权；本 fork 的控制台占用了整个 /admin/ 前缀且路由更具体，
+	// 那些端点在本进程内不可达。故按控制台自己的会话鉴权等价实现，语义与 pool
+	// 原语逐一对应：
+	//   manual_disable → SetManualDisabled(true, reason)  「对话流量摘除」：
+	//                    账号留在池里，签到/保活/排程照常，只是不参与选号
+	//   manual_enable  → SetManualDisabled(false, "")     只解运维意图
+	//   revive         → ReviveDisabled                   只解系统自动禁用
+	// 手动位与自动位正交：两个都清空账号才回到选号池。
+	case "manual_disable":
+		if found, _ := h.cfg.Pool.SetManualDisabled(uid, true, accountActionReason(r)); !found {
+			fail(w, 404, "账号不存在")
+			return
+		}
+	case "manual_enable":
+		if found, _ := h.cfg.Pool.SetManualDisabled(uid, false, ""); !found {
+			fail(w, 404, "账号不存在")
+			return
+		}
+	case "revive":
+		h.cfg.Pool.ReviveDisabled(uid)
+	// ---- 历史动作：保留可用（老前端/脚本），语义已被上面三个更精确的动作取代 --
+	// disable 走的是**自动禁用**位（Disable 带原因，签到解冻/refresh 等路径可能把它
+	// 自动撤销）；只想摘对话流量请用 manual_disable。
 	case "disable":
 		h.cfg.Pool.Disable(uid, "管理员停用")
 	case "enable":

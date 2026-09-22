@@ -101,11 +101,14 @@
     const m = Math.floor((s % 3600) / 60);
     return h ? `${h} 小时 ${m} 分钟` : `${m} 分钟`;
   }
+  // api 封装控制台接口。写操作一律带 CSRF 头与 JSON Content-Type，因为服务端
+  // 强制要求 application/json（否则 415），所以 body 由调用方显式给出。
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
     if (options.method && options.method !== "GET") {
       headers.set("Content-Type", "application/json");
       headers.set("X-CSRF-Token", state.csrf);
+      if (options.body === undefined) options = { ...options, body: "{}" };
     }
     const resp = await fetch(`/admin/api/${path}`, {
       credentials: "same-origin",
@@ -301,8 +304,12 @@
       loadModels($("model-account").value);
     }
   }
+  // accountBadge 判定账号的展示态。手动停用（manual_disabled）与系统自动禁用
+  // （disabled）是**两个独立的位**，文案必须分开——否则运维看到「已停用」会以为
+  // 是自己摘的，点「恢复」却没反应（实际要靠 revive 解自动位）。
   function accountBadge(a) {
-    if (a.disabled) return ["已停用", "disabled"];
+    if (a.manual_disabled) return ["已临时停用", "manual"];
+    if (a.disabled) return ["已禁用", "disabled"];
     if (a.cooling)
       return [a.cool_kind === "hard_credit" ? "积分冷却" : "冷却中", "cooling"];
     return ["健康", ""];
@@ -334,6 +341,13 @@
       const [label, cls] = accountBadge(a);
       const statusCell = node("td");
       statusCell.append(node("span", label, `status-badge ${cls}`));
+      // 两个位同时置位时两行都要显示：运维需要同时看到「我为什么摘它」和
+      //「系统为什么判它坏」——合并成一行会互相覆盖，排查时会丢信息。
+      if (a.manual_disabled) {
+        statusCell.append(
+          node("small", a.manual_reason ? `手动摘除：${a.manual_reason}` : "手动摘除", "status-detail manual-line"),
+        );
+      }
       const detail = a.disabled
         ? a.disabled_reason || a.reason
         : a.cooling
@@ -372,20 +386,29 @@
       const credit = node("button", "刷新积分", "mini-button");
       credit.type = "button";
       credit.addEventListener("click", () => accountAction(a.uid, "credits"));
-      const toggle = node(
-        "button",
-        a.disabled ? "启用" : "停用",
-        "mini-button",
-      );
-      toggle.type = "button";
-      toggle.addEventListener("click", () =>
-        accountAction(a.uid, a.disabled ? "enable" : "disable"),
-      );
-      actionBox.append(credit, toggle);
+      actionBox.append(credit);
+      // 暂停/恢复：只动 manual_disabled 位。健康号给「临时停用」，已手动摘除的号
+      // 给「恢复」。自动禁用的号不显示停用按钮——它已经在池外，再摘一次没有意义。
+      if (a.manual_disabled) {
+        actionBox.append(accountButton("恢复", "manual_enable", a.uid));
+      } else if (!a.disabled) {
+        actionBox.append(accountButton("临时停用", "manual_disable", a.uid));
+      }
+      // 复活：只动系统自动禁用位。与「恢复」正交，两个位都清空账号才回选号池。
+      if (a.disabled) {
+        actionBox.append(accountButton("复活", "revive", a.uid));
+      }
       actions.append(actionBox);
       tr.append(actions);
       body.append(tr);
     });
+  }
+  // accountButton 生成一个账号级 mini 操作按钮（统一 type/事件绑定，避免每处重复）。
+  function accountButton(label, action, uid) {
+    const button = node("button", label, "mini-button");
+    button.type = "button";
+    button.addEventListener("click", () => accountAction(uid, action));
+    return button;
   }
   function clearCopyFallback() {
     if (state.copyFallback && state.copyFallback.parentNode) {
@@ -1026,19 +1049,29 @@
       }
     }
   }
+  // ACCOUNT_ACTION_NOTICE 各账号操作的成功文案。措辞刻意区分两个位：
+  // 「临时停用/恢复」是运维意图，「复活」解的是系统自动判定——用户看到
+  //「已启用」却仍不可选（自动位没清）时最容易困惑，故这里说清楚。
+  const ACCOUNT_ACTION_NOTICE = {
+    credits: "积分已刷新",
+    manual_disable: "账号已临时停用（签到与保活照常，随时可恢复）",
+    manual_enable: "账号已恢复，重新参与选号",
+    revive: "已清除系统禁用状态；若账号仍被临时停用，请再点「恢复」",
+    disable: "账号已停用",
+    enable: "账号已启用",
+  };
   async function accountAction(uid, action) {
     try {
+      // 手动停用带原因（运维留痕）；其余动作空体即可。
+      const body =
+        action === "manual_disable"
+          ? JSON.stringify({ reason: $("manual-disable-reason").value.trim() })
+          : "{}";
       await api(`accounts/${encodeURIComponent(uid)}/${action}`, {
         method: "POST",
-        body: "{}",
+        body,
       });
-      notice(
-        action === "credits"
-          ? "积分已刷新"
-          : action === "disable"
-            ? "账号已停用"
-            : "账号已启用",
-      );
+      notice(ACCOUNT_ACTION_NOTICE[action] || "操作已完成");
       await loadStatus(true);
     } catch (err) {
       notice(err.message, true);
