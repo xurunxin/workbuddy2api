@@ -55,6 +55,12 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:${{ github.sha }}
+          # REVISION 必须注入：Dockerfile 的 ARG 缺省是 "unknown"，不传的话每个
+          # CI 镜像的 org.opencontainers.image.revision 都是 unknown。而 OpenWrt 网关
+          # 的 release.sh 把该标签当**硬门**——deploy 会断言它等于目标 revision，
+          # 不匹配即拒绝。少了这一行，CI 镜像一律无法部署（只能本地 build）。
+          build-args: |
+            REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
