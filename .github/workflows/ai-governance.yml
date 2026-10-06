@@ -1,20 +1,27 @@
 # AI 治理：垃圾检测 + 要点提炼 + canonical 归并（issue）+ PR 关联（PR）
 #
-# 触发：
-#   - issues.opened            → issue 治理（归并 / 规范化重开）
-#   - pull_request_target.opened → PR 治理（要点提炼 + canonical 关联，永不关闭合法 PR）
+# 【当前状态：仅手动触发】
+# 原本还有 issues.opened 与 pull_request_target.opened 两个自动触发，现已摘除。
+# 原因：这套治理是继承自上游的资产，上游维护者消失后，原先由其配置与担保的外部依赖
+# （Anthropic Claude GitHub App 换票、GitHub Models 免费额度、AI_BASE_URL/AI_API_KEY/
+# AI_MODEL 三个 secrets）不再有人维护。单人维护 fork 时自动治理的风险大于收益——
+# 无人值守的 issue/PR 写操作可能误判关闭，也会持续消耗外部推理额度。
+# 代码与配置全部保留，需要时从下方「恢复自动触发」那段把两个 trigger 拷回即可。
 #
-# 上线策略：先 dry-run: true 跑一段时间人工确认效果，再改为 false 进入治理。
+# 恢复自动触发时注意：pull_request_target 必须保留在**默认分支**上（它以目标仓库身份运行，
+# 这是 PR 治理改标题/正文/建 canonical 所需写权限的来源）；且 issue/PR 两条自动路径要求仓库
+# 已安装 Claude Code App、Secrets 已配好，否则换票失败会回落 github-actions[bot] 署名。
+#
+# 手动触发：Actions 面板 → AI Governance → Run workflow。
 name: AI Governance
 
 on:
-  issues:
-    types: [opened]
   workflow_dispatch: {}
-  # pull_request_target 让 action（含写操作）以目标仓库而不是 fork 身份运行 ——
-  # 这是 PR 治理改标题/正文/建 canonical 所必需的写权限来源（详见 DESIGN.md §12）。
-  pull_request_target:
-    types: [opened]
+  # ↓↓↓ 恢复自动触发时取消下面两段注释 ↓↓↓
+  # issues:
+  #   types: [opened]
+  # pull_request_target:
+  #   types: [opened]
 
 permissions:
   # claude-identity 换票：用 runner OIDC 向 Anthropic 换 Claude GitHub App 的 installation token，

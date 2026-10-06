@@ -1,0 +1,89 @@
+# ci.yml —— 测试门禁。push 到 master 与任意 PR 都跑。
+#
+# 为什么有这份文件：仓库里有 1343 个 Go 测试函数和 13 个治理 action 的 jest 测试，
+# 但在它之前没有任何 workflow 执行过它们——build.yml 只在定时/打 tag 时构建镜像，
+# ai-governance.yml 只在 issue/PR 事件上跑治理机器人。测试一直在，但从未被叫醒。
+#
+# 三个 job 覆盖三套测试资产：
+#   go             —— 编译、vet、-race 全量测试（含 internal/scheduler 的脚本存在性断言，
+#                     故必须完整 checkout，scripts/ 不能缺）
+#   shell-regression —— 两个针对具体 issue 的包装脚本回归：
+#                     test_wrapper_freshness.sh (#191 源码更新即重编)
+#                     test_login_sh.sh       (#160 chown 后失效)
+#                     后者用 setpriv 切 uid 12345 构造真实权限语义，setup_dir 里的
+#                     chown 需要 root，故以 sudo 运行。
+#   governance     —— .github/actions/ai-governance 的 jest 套件（需 devDependencies，
+#                     故用 npm ci 而非 npm ci --production）。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支的新推送取消在跑的旧 run，避免合并前反复推送导致排队堆积。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: build / vet / test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -race 检并发数据竞争：这是账号池 + 调度器 + keepalive 的并发代理，
+      # 竞态不会让测试变红，却会在生产里变成难以复现的脏数据。
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  shell-regression:
+    name: wrapper / login shell regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 该脚本用 stub go 作观测点，不做真实编译，因此无需 Go 工具链。
+      - name: Wrapper freshness (#191)
+        run: bash scripts/test_wrapper_freshness.sh
+
+      # setpriv/chown 构造非 root 权限语义，需 root；setpriv 已随 util-linux 预装。
+      - name: login.sh regression (#160)
+        run: sudo bash scripts/test_login_sh.sh
+
+  governance:
+    name: ai-governance jest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/ai-governance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .github/actions/ai-governance/package-lock.json
+
+      - name: Install (含 devDependencies，jest 在其中)
+        run: npm ci
+
+      - name: Test
+        run: npm test
