@@ -1,6 +1,7 @@
 package main
 
 import (
+	"workbuddy2api/internal/alert"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/server"
 )
@@ -19,3 +20,30 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 		return p.AvailableUIDsForModelRealm(bare, realm)
 	}
 }
+
+// alertSource 把网关的健康快照适配成 alert.Source。
+//
+// 只暴露两个窄方法 —— Health 与 WAFActive —— 正是「WAF 激活位」这两个能力。
+// internal/alert 因此不反向依赖网关内部结构（也就不会被 pool/Handler 的字段
+// 改动牵连），测试里也能直接注入假数据源而不必造一整个网关。
+type alertSource struct {
+	pool *pool.Pool
+	h    *server.Handler
+}
+
+// Health 把 pool.RealmHealth 转成 alert.Health（只取告警判断需要的字段）。
+func (s alertSource) Health(realm string) alert.Health {
+	h := s.pool.RealmHealth(realm)
+	return alert.Health{
+		Total:    h.Total,
+		Healthy:  h.Healthy,
+		Cooling:  h.Cooling,
+		Disabled: h.Disabled,
+		Breaker:  h.Breaker,
+		Degraded: h.Degraded,
+		InFlight: h.InFlight,
+	}
+}
+
+// WAFActive 报告 IP 级 WAF 拦截是否正在生效。
+func (s alertSource) WAFActive() bool { return s.h.WAFActive() }

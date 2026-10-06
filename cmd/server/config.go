@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -39,6 +40,43 @@ type Config struct {
 		// 0/负数视为非法 → normalize 报错。
 		MaxBodyMB int `json:"max_body_mb"`
 	} `json:"server"`
+
+	// Metrics Prometheus 指标面。默认整段关闭：指标端点与告警都是"开网关就额外
+	// 暴露一个面"，且 /metrics 的数据源虽全是进程内只读快照（scrape 不打上游），
+	// 但仍需 api_key 鉴权，故与 admin 面一样默认不注册。
+	//
+	// 告警是**独立**的顶层段（alerting）而非嵌在本段下：告警评估的是"号池健康度"
+	// 这个全局事实，与"是否开指标面"无关——把 enabled=false 当成"关告警"的隐式
+	// 开关，会让只想收告警、暂不开 /metrics 的部署静默失去告警。
+	Metrics struct {
+		Enabled bool `json:"enabled"`
+	} `json:"metrics"`
+
+	// Alerting 可用性阈值告警。每 Interval 评估一次健康度，连续 ForTicks 拍低于
+	// 阈值 → POST webhook；连续 ClearTicks 拍恢复 → 可选发 resolve。阈值按 realm
+	// 分别设（cn / global），因为两域可用性互相独立。
+	Alerting struct {
+		Enabled    bool   `json:"enabled"`
+		WebhookURL string `json:"webhook_url"`
+		Secret     string `json:"secret"` // HMAC 签名，防 webhook 被他人冒用
+		IntervalSeconds     int  `json:"interval_seconds"`
+		TimeoutSeconds      int  `json:"timeout_seconds"`
+		StartupGraceSeconds int  `json:"startup_grace_seconds"`
+		MinHealthyCN        int  `json:"min_healthy_cn"`
+		MinHealthyGlobal    int  `json:"min_healthy_global"`
+		RecoverHealthy      int  `json:"recover_healthy"`
+		BreakerThreshold    int  `json:"breaker_threshold"`
+		ForTicks            int  `json:"for_ticks"`
+		ClearTicks          int  `json:"clear_ticks"`
+		SendResolve         bool `json:"send_resolve"`
+	} `json:"alerting"`
+
+	// Budget 当日积分预算闸。DailyCreditLimit <= 0 = 关闭该闸（不限），
+	// 此时 used 仍照常累计并出现在 /status 的 daily_budget 段——运维可以先以
+	// 观察模式跑几天、看真实日耗再决定阈值，不必先开闸才知道该设多少。
+	Budget struct {
+		DailyCreditLimit float64 `json:"daily_credit_limit"`
+	} `json:"budget"`
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -178,6 +216,11 @@ type Config struct {
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// 告警评估三项时长的解析结果（alerting）。0 = 未配置，
+	// 回落 alert 包内的 defaultInterval/Timeout/StartupGrace。
+	AlertIntervalDur      time.Duration `json:"-"`
+	AlertTimeoutDur       time.Duration `json:"-"`
+	AlertStartupGraceDur  time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -227,6 +270,19 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 告警默认阈值：缺省**关闭**（Enabled=false），但把其余键的缺省值写实，
+	// 这样 config.example.json 与「用户只改一个 enabled=true」的路径都读得到
+	// 合理起点。阈值本身取保守值：1 个 healthy 账号、连续 2 拍才告警、
+	// 连续 2 拍恢复才发 resolve——宁可晚报早恢复，也不要抖动刷屏。
+	c.Alerting.IntervalSeconds = 30
+	c.Alerting.TimeoutSeconds = 5
+	c.Alerting.StartupGraceSeconds = 30
+	c.Alerting.MinHealthyCN = 1
+	c.Alerting.MinHealthyGlobal = 0
+	c.Alerting.RecoverHealthy = 1
+	c.Alerting.BreakerThreshold = 0
+	c.Alerting.ForTicks = 2
+	c.Alerting.ClearTicks = 2
 	return c
 }
 
@@ -335,6 +391,52 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_METRICS_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Metrics.Enabled = b
+		}
+	}
+	// 预算上限：ParseFloat 失败时**忽略**而非报错——与本文件其余 env 的处理风格
+	// 一致（非法 env 不该把一个能启动的服务变成起不来；真要拦就由 normalize 拦
+	// 最终生效值里的负数）。
+	if v := os.Getenv("WB2A_BUDGET_DAILY_CREDIT_LIMIT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Budget.DailyCreditLimit = f
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Alerting.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_ALERTING_WEBHOOK_URL"); v != "" {
+		c.Alerting.WebhookURL = v
+	}
+	if v := os.Getenv("WB2A_ALERTING_SECRET"); v != "" {
+		c.Alerting.Secret = v
+	}
+	if v := os.Getenv("WB2A_ALERTING_SEND_RESOLVE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Alerting.SendResolve = b
+		}
+	}
+	// 告警阈值与拍数的 env 覆盖。整数项一律"解析失败即忽略"，不覆盖 config 值。
+	envInt := func(name string, dst *int) {
+		if v := os.Getenv(name); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*dst = n
+			}
+		}
+	}
+	envInt("WB2A_ALERTING_INTERVAL_SECONDS", &c.Alerting.IntervalSeconds)
+	envInt("WB2A_ALERTING_TIMEOUT_SECONDS", &c.Alerting.TimeoutSeconds)
+	envInt("WB2A_ALERTING_STARTUP_GRACE_SECONDS", &c.Alerting.StartupGraceSeconds)
+	envInt("WB2A_ALERTING_MIN_HEALTHY_CN", &c.Alerting.MinHealthyCN)
+	envInt("WB2A_ALERTING_MIN_HEALTHY_GLOBAL", &c.Alerting.MinHealthyGlobal)
+	envInt("WB2A_ALERTING_RECOVER_HEALTHY", &c.Alerting.RecoverHealthy)
+	envInt("WB2A_ALERTING_BREAKER_THRESHOLD", &c.Alerting.BreakerThreshold)
+	envInt("WB2A_ALERTING_FOR_TICKS", &c.Alerting.ForTicks)
+	envInt("WB2A_ALERTING_CLEAR_TICKS", &c.Alerting.ClearTicks)
 }
 
 func (c *Config) normalize() error {
@@ -346,6 +448,64 @@ func (c *Config) normalize() error {
 	// 大请求又被静默 413——不如 fail fast 提示显式配大上限。
 	if c.Server.MaxBodyMB <= 0 {
 		return fmt.Errorf("server.max_body_mb: %d 非法（需为正整数，单位 MB）", c.Server.MaxBodyMB)
+	}
+	// 预算上限：负数报错而非当作 0。负值与 0（=关闭该闸）语义天差地别，
+	// 静默折叠成"关闭"会让运维以为自己设了防超支闸、实则完全没有。
+	if c.Budget.DailyCreditLimit < 0 {
+		return fmt.Errorf("budget.daily_credit_limit: %v 非法（0 = 关闭该闸，不可为负）", c.Budget.DailyCreditLimit)
+	}
+	// 告警：enabled=true 时 webhook_url 是硬前置——没有投递目标还"启用告警"
+	// 等于给运维一个静默失效的安全感，比明确报错危险得多。
+	//
+	// 负值一律拒绝（无论 enabled 与否）：负阈值没有合理语义，静默回落成默认值
+	// 会让运维以为自己设了严格阈值、实则宽松得多。
+	for _, n := range []struct {
+		name string
+		val  int
+	}{
+		{"interval_seconds", c.Alerting.IntervalSeconds},
+		{"timeout_seconds", c.Alerting.TimeoutSeconds},
+		{"startup_grace_seconds", c.Alerting.StartupGraceSeconds},
+		{"min_healthy_cn", c.Alerting.MinHealthyCN},
+		{"min_healthy_global", c.Alerting.MinHealthyGlobal},
+		{"recover_healthy", c.Alerting.RecoverHealthy},
+		{"breaker_threshold", c.Alerting.BreakerThreshold},
+		{"for_ticks", c.Alerting.ForTicks},
+		{"clear_ticks", c.Alerting.ClearTicks},
+	} {
+		if n.val < 0 {
+			return fmt.Errorf("alerting.%s: %d 非法（不可为负）", n.name, n.val)
+		}
+	}
+	// recover_healthy 的 0 **不是**哨兵：阈值为 0 时 healthy>=0 恒真，迟滞彻底失效、
+	// 告警会在第一次评估后立刻解除。故 0 回落默认 1。
+	//
+	// 与之相对 min_healthy_cn / min_healthy_global / breaker_threshold 的 0 是
+	// 「关闭该规则」的有效哨兵，必须原样保留——纯 CN 部署常把 min_healthy_global
+	// 配 0，若被回落成 1 就会因"没有 global 账号"而常驻误报。
+	if c.Alerting.RecoverHealthy == 0 {
+		c.Alerting.RecoverHealthy = 1
+	}
+	// 三项时长 0 = 用 alert 包内默认值（那里还有一次 normalize 兜底）；
+	// 这里只把显式正值折算成 Duration。
+	if c.Alerting.IntervalSeconds > 0 {
+		c.AlertIntervalDur = time.Duration(c.Alerting.IntervalSeconds) * time.Second
+	}
+	if c.Alerting.TimeoutSeconds > 0 {
+		c.AlertTimeoutDur = time.Duration(c.Alerting.TimeoutSeconds) * time.Second
+	}
+	if c.Alerting.StartupGraceSeconds > 0 {
+		c.AlertStartupGraceDur = time.Duration(c.Alerting.StartupGraceSeconds) * time.Second
+	}
+	if c.Alerting.Enabled {
+		raw := strings.TrimSpace(c.Alerting.WebhookURL)
+		if raw == "" {
+			return fmt.Errorf("alerting.enabled=true 但 webhook_url 为空：请配置投递地址或将该开关置 false")
+		}
+		u, perr := url.Parse(raw)
+		if perr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("alerting.webhook_url: %q 非法（需为带 host 的 http/https URL）", raw)
+		}
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)

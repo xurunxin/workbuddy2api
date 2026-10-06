@@ -42,6 +42,18 @@ type Auth struct {
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// Groups 账号的**业务分组标签**（如 ["internal","external"]），落盘于文件**顶层**
+	// groups 键（嵌套形与扁平形同一位置，与 device_token 同风格）。
+	//
+	// 语义：密钥带 groups 时，只有与之**有交集**的账号参与选号；密钥不带 groups
+	// （主密钥 / 未配置）时不过滤。账号 Groups 为空 = **未分组**，默认不被任何
+	// 分组密钥选中（显式拒绝，不是宽松放行）。
+	//
+	// 与 realm 刻意分治：realm 是**技术域**（cn/global），由 RefreshToken 在锁内
+	// 改写；Groups 是**运维自定**的业务标签，可多个，用来决定"哪把密钥能用这件
+	// 事"，从技术域里解耦出来。
+	Groups []string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -182,6 +194,77 @@ func (a *Auth) RealmStored() string {
 
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
+
+// GroupsValue 返回账号分组标签的**副本**（调用方可能缓存或跨 goroutine 传递，
+// 返回副本以免误改内部切片）。
+func (a *Auth) GroupsValue() []string {
+	if a == nil || len(a.Groups) == 0 {
+		return nil
+	}
+	out := make([]string, len(a.Groups))
+	copy(out, a.Groups)
+	return out
+}
+
+// MatchesGroups 报告本账号对「允许分组」是否可见：
+//
+//	want 为空     → true（不限分组：主密钥 / 未配 groups 的密钥语义）
+//	账号未打标签  → false，**默认拒绝**：未分组的账号不给任何分组密钥用
+//	否则         → 要求交集非空
+//
+// 比较是**精确相等**（不做大小写折叠、不做前缀匹配）：组名规范由密钥侧配置
+// 与控制台把关，读侧保持"读进来是什么就是什么"，避免两侧规则不一致导致的静默错配。
+func (a *Auth) MatchesGroups(want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	if a == nil || len(a.Groups) == 0 {
+		return false
+	}
+	for _, w := range want {
+		for _, g := range a.Groups {
+			if w == g {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ExpiresAtValue 在锁内直读持久化的过期时间戳。
+//
+// 与 NeedsRefresh 的差别：后者算的是"是否需要续期"（含提前量与 realm 特例），
+// ExpiresAt 才是选号/续期判定真正用的那个值。两者不一致时（如文件陈旧但进程内
+// 已续期），运维在控制台看到的就是一个不存在的「已过期」。
+func (a *Auth) ExpiresAtValue() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ExpiresAt
+}
+
+// CredWrittenAt 返回凭证文件（FilePath）的最近写回时刻，ok=false 表示文件不可 stat
+// （不存在 / 无权限 / FilePath 为空）。
+//
+// 为什么要它：区分两种「过期显示」——
+//  1. 续期链路正常，文件刚被 SaveAtomic 写过，只是 access token 本身寿命短；
+//  2. 文件长期未更新，说明续期根本没跑（账号被 disabled、RunKeepaliveNow 被 continue
+//     跳过它）——此时「过期」是病因的**症状**而不是原因。只透出 expiresAt 一个
+//     数字区分不出这两者。
+//
+// 不返回 error：巡检/状态透出是**尽力而为**的观测，缺文件不该让它失败或报错。
+func (a *Auth) CredWrittenAt() (time.Time, bool) {
+	if a == nil || a.FilePath == "" {
+		return time.Time{}, false
+	}
+	fi, err := os.Stat(a.FilePath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return fi.ModTime(), true
+}
 
 // Snapshot 返回凭证的**脱离锁的深拷贝**，用于发起上游 RPC（避免读取期间被
 // RefreshToken 并发改写）与跨包传递。

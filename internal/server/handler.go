@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -57,6 +58,63 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+
+	// MetricsEnabled Prometheus 指标端点开关（config metrics.enabled，默认 false）。
+	// 关闭时 /metrics 不注册——理由与 admin 面一致：不向未鉴权探测暴露"这里有个
+	// 指标面"。开启后与 /status、/v1/stats 同鉴权口径。
+	MetricsEnabled bool
+
+	// BudgetLimit 当日累计 credit 上限（config budget.daily_credit_limit）。
+	// <=0 = 关闭该闸（不限），行为与引入前逐字一致。计数按 CST 自然日重置、
+	// 进程内不落盘（见 budget.go）。
+	BudgetLimit float64
+
+	// TaskLedger 任务执行台账的只读视图（/status 的 task_ledger 段 + /metrics 的
+	// 任务指标）。nil = 未接线，此时两处都不含任务维度——与 Pool/Upstream 的
+	// 接线风格一致，测试可注入假台账。
+	//
+	// 用窄接口而非直接依赖 internal/scheduler：server 包不反向 import scheduler。
+	// 台账的数据结构与存储放在 internal/taskledger，两个包都只依赖它，不产生环。
+	TaskLedger TaskLedgerReader
+
+	// CheckinFn 手动触发一次全量签到（POST /v1/checkin），返回报告。
+	//
+	// ★ 必须在网关**进程内**执行 ★ 号池的 credits 只由 scheduler.CheckinAll 写入
+	// （SetCreditsDetailed）；改用外部 CLI（deploy/signin）签到虽然上游确实签到了，
+	// 但**不会**更新网关内存里的额度 —— 这正是「签到成功、控制台积分却不刷新」的
+	// 成因。故这里要求的是一个能直接跑 CheckinAll 的回调，而不是去 exec 一个 CLI。
+	//
+	// busy=true 表示已有一次签到正在跑（与定时撞车），调用方应回 429 提示稍后再试。
+	// nil = 未接线（如测试），端点回 501。
+	CheckinFn func() (report CheckinReport, busy bool, err error)
+}
+
+// CheckinResult 单账号签到结果（POST /v1/checkin 返回体的 results 元素）。
+type CheckinResult struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Realm    string `json:"realm,omitempty"`
+	// Status ok（签到成功）/ already（上游判定今天已签，幂等）/ fail / skipped。
+	Status string `json:"status"`
+	// Credits 签到后的余额；仅余额查询成功时非 nil。
+	// ★ global 账号也走这条路 ★ 它们跳过签到（无签到体系），但余额查询是号池
+	// 「剩余积分」的唯一数据源，故仍会出现在 results 里。
+	Credits *int64 `json:"credits,omitempty"`
+	// Detail 失败/跳过原因（成功与「已签到」不填）。
+	Detail string `json:"detail,omitempty"`
+}
+
+// CheckinReport 一次全量签到的报告。
+type CheckinReport struct {
+	// Enabled 排程是否启用（schedule.checkin_enabled）；false 时手动入口仍可用。
+	Enabled bool            `json:"enabled"`
+	Hours   []int           `json:"hours"` // 自动签到时点（本地小时）
+	Total   int             `json:"total"`
+	OK      int             `json:"ok"`
+	Already int             `json:"already"`
+	Fail    int             `json:"fail"`
+	Skipped int             `json:"skipped"`
+	Results []CheckinResult `json:"results"`
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -92,6 +150,13 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// lastCheckinUnix 上次手动签到的完成时刻（Unix 秒，0 = 从未手动触发过）。
+	// 供 /status 与台账展示"最近一次手动签到"，不参与任何选号或调度判定。
+	// 用 atomic：checkin.go 的读写发生在 HTTP 请求 goroutine，而 /status 可能在
+	// 另一个 goroutine 并发读，裸 int64 会构成数据竞争（-race 会报）。
+	lastCheckinUnix atomic.Int64
+	// budget 当日积分预算闸（budget.go）。常驻；limit<=0 时全部门失效。
+	budget *dailyBudget
 }
 
 // NewHandler 构建 handler。
@@ -115,6 +180,9 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxBodyBytes = 20 << 20 // 请求体上限兜底 20MB
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), responses: newResponseStore()}
+	// budget 常驻而非按开关懒建：limit<=0 时 admit() 恒 true、add() 恒不计，
+	// 每请求多一次函数调用可忽略，换来的是热路径上无分支判断配置是否接线。
+	h.budget = newDailyBudget(cfg.BudgetLimit)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.createResponse))
 	h.mux.HandleFunc("GET /v1/responses/{response_id}", h.withAuth(h.getResponse))
@@ -128,6 +196,16 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// 手动签到入口：与 /v1/stats/reset 不同量级（一次全量账号签到 vs 一次计数清零），
+	// 但同属"运维自助"而非"业务调用"；且控制台要开箱可用，不该要求先开管理面。
+	// 仍需 api_key（withAuth）。
+	h.mux.HandleFunc("POST /v1/checkin", h.withAuth(h.checkin))
+	// Prometheus 指标端点（默认关闭，config metrics.enabled 开启后生效）。
+	// 条件注册：未开启时路径不存在，未鉴权探测无法区分它与真 404。
+	// 数据源全是进程内只读快照，scrape 不触发任何上游请求。
+	if cfg.MetricsEnabled {
+		h.mux.HandleFunc("GET /metrics", h.withAuth(h.promMetrics))
+	}
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }
@@ -203,9 +281,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	// daily_budget 当日积分预算台账（budget.go）：已用 / 上限 / 当日被拒次数。
+	// 上限 ≤0 表示闸关闭（不限），此时 used 仍照常累计——运维可以先用观察模式
+	// 跑几天、看真实日耗再决定阈值，不必先开闸才知道该设多少。
+	budgetUsed, budgetLimit, budgetRejected := h.budget.snapshot()
 	// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
 	// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
 		"healthy":        healthy,
@@ -223,7 +305,20 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
-	})
+		// daily_budget 按 CST 自然日重置，进程重启清零（见 budget.go）。
+		"daily_budget": map[string]any{
+			"used":     budgetUsed,
+			"limit":    budgetLimit,
+			"rejected": budgetRejected,
+			"day":      cstDay(time.Now()),
+		},
+	}
+	// task_ledger 六类任务「最近一轮」的结果 + 当日失败重试状态（task_ledger.go）。
+	// 未接线时不写该键（而非写 null）：老部署与测试的响应体形状保持不变。
+	if tl := h.taskLedgerStatus(); tl != nil {
+		body["task_ledger"] = tl
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // countsMapFrom 把 CountsDetailed 五元组编码为 /status realm_totals 的字段对象。
@@ -575,6 +670,16 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	// 当日积分预算闸（config budget.daily_credit_limit，缺省 0 = 关闭）。
+	// 位置刻意在**读 body 之前**：被拒的请求不该先把几十 MB 请求体读进内存再丢掉。
+	// 429 是 OpenAI 对「配额耗尽」的既有语义（客户端会退避重试），code 取自定义以便与
+	// 账号级限流（上游 429 走 soft_rate 路径）区分开。
+	if !h.budget.admit() {
+		used, limit, _ := h.budget.snapshot()
+		writeOpenAIError(w, http.StatusTooManyRequests, "daily_budget_exceeded",
+			fmt.Sprintf("daily credit budget exhausted (used %.2f of %.2f, resets at 00:00 CST)", used, limit))
+		return
+	}
 	// 请求体上限（保留 issue #41 预拦截，默认 20MB）：LimitReader 读 limit+1 以探测
 	// "超限"（读到 limit+1 字节即已超），超限直接 413，不把截断的半截 JSON 喂给上游
 	// （截断 body 让上游 unmarshal 报 unexpected EOF，网关却罚号轮空）。
@@ -613,7 +718,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	// 注意：本行必须在下方「图像/视频模型误投」守卫**之前**——守卫也是一条请求出口，
 	// 同样要留一行日志（否则客户端反复误投时运维看不到任何痕迹）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), body, peek.Stream, h.budget)
 	defer st.done()
 
 	// 图像/视频模型误投对话入口 → 本地明确拒绝 + 指路专用接口。
@@ -971,6 +1076,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 响应头透出实际服务的账号：上游选号对客户端原本完全不可见——管理面板
+		// 的网关据此把每次成功请求记到账号名下（按账号的消耗统计），排障时也能
+		// 看到「这次是谁在答」。uid 是十六进制 ASCII，可直接进响应头；昵称可能
+		// 含非 ASCII，不入头（消费方按 uid 自行映射）。放在 NoteSuccess 之后：
+		// 头的语义是「这个号成功服务了本次请求」——中途失败换号的账号不冒领。
+		// 此时尚未写任何字节，流式（首帧前）与非流式（writeJSON 前）都生效。
+		w.Header().Set("X-Wb-Account", acct.UID)
 		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
