@@ -14,6 +14,7 @@ import (
 
 	"workbuddy2api/internal/accesskey"
 	"workbuddy2api/internal/admin"
+	"workbuddy2api/internal/alert"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/catalog"
 	"workbuddy2api/internal/pool"
@@ -230,11 +231,51 @@ func main() {
 		MaxBodyBytes:   int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
+		// Prometheus 指标面（config metrics.enabled，默认关闭）。开启后 /metrics 才
+		// 注册路由，且与 /status 同鉴权口径。
+		MetricsEnabled: cfg.Metrics.Enabled,
+		// 当日积分预算上限（0 = 关闭该闸）。≤0 时闸门全失效，行为与引入前逐字一致。
+		BudgetLimit: cfg.Budget.DailyCreditLimit,
+		// 任务执行台账的只读视图（/status 的 task_ledger 段 + /metrics 的任务指标）。
+		// 与手动任务触发同款：*scheduler 结构上即满足 server 侧的窄接口，
+		// server 包不必反向 import scheduler。
+		TaskLedger: sch.Ledger(),
+		// 手动签到入口（POST /v1/checkin）。★ 走进程内 CheckinAll ★ 外部 CLI
+		// 签到不会更新网关内存额度（见 internal/server/checkin.go 顶部注释）。
+		CheckinFn: checkinReportFn(sch, p, cfg),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+
+	// 可用性阈值告警（config alerting.enabled，默认关闭）：独立 ticker 评估只读健康
+	// 快照，越界时 POST 到运维自备的 webhook。与请求路径完全隔离，且从不调用上游。
+	alertMon := alert.New(alert.Config{
+		Enabled:          cfg.Alerting.Enabled,
+		WebhookURL:       cfg.Alerting.WebhookURL,
+		Secret:           cfg.Alerting.Secret,
+		Interval:         cfg.AlertIntervalDur,
+		Timeout:          cfg.AlertTimeoutDur,
+		StartupGrace:     cfg.AlertStartupGraceDur,
+		MinHealthyCN:     cfg.Alerting.MinHealthyCN,
+		MinHealthyGlobal: cfg.Alerting.MinHealthyGlobal,
+		RecoverHealthy:   cfg.Alerting.RecoverHealthy,
+		BreakerThreshold: cfg.Alerting.BreakerThreshold,
+		ForTicks:         cfg.Alerting.ForTicks,
+		ClearTicks:       cfg.Alerting.ClearTicks,
+		SendResolve:      cfg.Alerting.SendResolve,
+		ServiceName:      server.ServiceName,
+	}, alertSource{pool: p, h: h})
+	go alertMon.Run(ctx)
+	defer alertMon.Stop()
+	if !cfg.Alerting.Enabled {
+		log.Printf("可用性告警已禁用（alerting.enabled=false）")
+	} else {
+		log.Printf("可用性告警已启用：每 %ds 评估，健康阈值 cn=%d / global=%d（0=关闭该规则），熔断阈值=%d（0=关闭）",
+			cfg.AlertIntervalDur/time.Second, cfg.Alerting.MinHealthyCN,
+			cfg.Alerting.MinHealthyGlobal, cfg.Alerting.BreakerThreshold)
+	}
 	manager, err := newConfigManager(cfg)
 	if err != nil {
 		log.Fatalf("load management config: %v", err)
