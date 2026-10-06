@@ -22,7 +22,7 @@ FROM alpine:3.20
 # 部署侧据此校验「加载进来的镜像确实是本次要发的那一版」——tag 复用或加载错 tar
 # 都会导致静默降级到旧版本，而有 revision 标签就能在切换前直接断言。
 ARG REVISION=unknown
-ARG SOURCE_URL=https://github.com/Sliverkiss/workbuddy2api
+ARG SOURCE_URL=https://github.com/xurunxin/workbuddy2api
 LABEL org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 # python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。

@@ -40,7 +40,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ghcr 镜像名必须全小写：github.repository 含大写（Sliverkiss/...），需转小写
+      # ghcr 镜像名必须全小写：github.repository 保留原始大小写（Owner/Repo），
+      # 而 GHCR 的路径规范要求小写，故统一折叠。
       - name: Compute image name (lowercase)
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
