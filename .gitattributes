@@ -1,0 +1,12 @@
+# shell 脚本与带 shebang 的 python 必须以 LF 检出。
+#
+# 起因：仓库没有 .gitattributes，而开发机 core.autocrlf=true，
+# 于是这些文件在 Windows 工作区被检出成 CRLF。仓库内存储是 LF（git ls-files --eol 显示
+# i/lf），所以 Linux CI 不会因此出错；但本地用 Git Bash 直接跑 scripts/test_wrapper_freshness.sh
+# 会报 `set: pipefail^M: invalid option name`——`set -euo pipefail\r` 里的回车被并进选项名，
+# 报错信息还会把光标折回，看起来像 "set: pipefail" 换行后才跟 ": invalid option name"。
+# 这个报错极具迷惑性，容易被误判成脚本逻辑问题。
+#
+# 显式声明 eol=lf 让 Windows 工作区也以 LF 检出，两端一致。
+*.sh text eol=lf
+*.py text eol=lf
