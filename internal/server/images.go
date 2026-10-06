@@ -197,7 +197,7 @@ func (h *Handler) imagesEndpoint(w http.ResponseWriter, r *http.Request, edit bo
 		edit = true
 	}
 
-	st := newChatStat(time.Now(), nil, false)
+	st := newChatStat(time.Now(), nil, false, h.budget)
 	st.model = "image:" + bareModel
 	st.mode = "image"
 	defer st.done()

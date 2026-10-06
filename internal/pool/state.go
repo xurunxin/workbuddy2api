@@ -5,6 +5,7 @@ package pool
 import (
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -57,6 +58,59 @@ func (p *Pool) ClearSessionDead(uid string) {
 		e.sessionDeadFails = 0
 		p.dirty.Store(true)
 	}
+}
+
+// —— 续期健康台账（P0-1）——
+//
+// 与 ClearSessionDead 的分工要分清：**ClearSessionDead 是判定**（清 12153 计数，
+// 影响会不会被杀号，要落盘），下面两个是**观测**（记"最近一次续期成不成功"，
+// 只给人看，不落盘、不影响任何选号/禁用决策）。
+//
+// 刻意不落盘的代价是重启失忆；收益是不会出现"文件里写着 3 天前续期成功、其实
+// 进程刚起来还没试过"这种自相矛盾的台账。对巡检脚本来说，`refresh_ok_at` 缺失
+// 与 `cred_written_at` 陈旧是两个独立的判据，不需要第三个持久化字段来对齐。
+
+// NoteRefreshOK 记录一次续期成功：打时间戳、清失败连击与错误摘要。
+// 调用点见 scheduler.go（checkin ×2 / keepalive）与 handler.go（chat 预刷新）。
+func (p *Pool) NoteRefreshOK(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	e.refreshOKAt = time.Now()
+	e.refreshFailStreak = 0
+	e.lastRefreshErr = ""
+	// 不置 dirty：运行态观测不参与 state.json，落盘是纯浪费（fsync 热路径）。
+}
+
+// NoteRefreshFail 记录一次续期失败：连击 +1 并留一份可读错误摘要。
+// 只观测、不判罚——是不是"该杀号"由调用方按 upstream.Error.Kind 决定
+// （12153 走 NoteSessionDead，其余走 NoteError）。混在一起会让网络抖动攒杀号进度。
+func (p *Pool) NoteRefreshFail(uid string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	e.refreshFailStreak++
+	if err != nil {
+		e.lastRefreshErr = logfmt.Truncate(err.Error(), 80)
+	}
+}
+
+// RefreshLedger 只读读出某账号的续期台账三元组（ok=false = 账号不存在）。
+// 供 /status（经 statusOf，已持读锁时走字段直读，不经此方法）以外的调用方使用。
+func (p *Pool) RefreshLedger(uid string) (okAt time.Time, failStreak int, lastErr string, found bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}, 0, "", false
+	}
+	return e.refreshOKAt, e.refreshFailStreak, e.lastRefreshErr, true
 }
 
 // ReviveDisabled 人工/端点复活入口：清除 disabled + reason + 连续 12153 计数，
@@ -329,10 +383,23 @@ func (p *Pool) availableUIDsLocked(realm string, health func(e *entry, now time.
 // 这是粘性能"换得动"的关键：绑定只记 uid，若只按账号级 healthy 校验，
 // 被模型级限额的号（账号整体仍健康）会被持续选中直到轮换次数耗尽。
 func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
+	return p.PickByUIDForModelGroups(uid, model, nil)
+}
+
+// PickByUIDForModelGroups 在 PickByUIDForModel 之上加一道**业务分组校验**：
+// 绑定号不属于本次请求密钥可见的分组时返回 nil，让调用方（handler）解绑并回落普通轮换。
+//
+// 为什么粘性路径也必须校验：粘性绑定在 session_sticky 里**只记 uid**，不记密钥身份。
+// 同一个会话复用不同密钥（或账号被改过组）时会命中一个"本密钥不该看见"的号——
+// 不校验的话隔离会被粘性路径整条绕过，且表现为偶发而非必现，极难定位。
+func (p *Pool) PickByUIDForModelGroups(uid, model string, groups []string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		return nil
+	}
+	if !e.a.MatchesGroups(groups) {
 		return nil
 	}
 	now := time.Now()
@@ -368,31 +435,86 @@ func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, di
 }
 
 // countsDetailedForRealm 是两函数共用的遍历实现；realm=="" 不加谓词。
+// 委托 RealmHealth 做实际遍历——两个入口的 5 个字段必须逐字同口径，
+// 分开实现迟早漂移（原实现与 RealmHealth 若各写一份 switch，改一处忘另一处
+// 会让 /status 与 /metrics 报出不一致的账号数，运维据此误判池健康）。
 func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
+	h := p.RealmHealth(realm)
+	return h.Total, h.Healthy, h.Cooling, h.Disabled, h.InFlightFull
+}
+
+// RealmHealth 单 realm 的健康度分解（供 /metrics 只读导出）。
+//
+// 设计纪律：**纯现算，不新增累加器**。全部字段由 entry 现有字段在调用时刻算出，
+// 因此不存在"第二份状态"与随之而来的双写一致性风险。Total/Healthy/Cooling/
+// Disabled/InFlightFull 五字段与 CountsDetailed(ForRealm) 逐字同口径（后者已委托
+// 本方法），另拆出四个**细分维度**供告警与看板使用：
+//
+//   - Breaker/Degraded 是"为什么在冷却"的原因分解，与 Cooling 有交集（一个熔断中
+//     的账号既计入 Cooling 也计入 Breaker）；禁用账号若残留 breakerUntil 也计入
+//     Breaker（disableLocked 刻意保留熔断器，见 transition.go）。
+//   - ManualDisabled 是 Disabled 的子集，供区分"运维摘除"与"系统判死"。
+//   - ModelCooled 是存在**未过期**模型级冷却的账号数（6004/11102），与账号级
+//     健康正交——这类账号对触发模型不可用、对其他模型仍可选（issue #31）。
+//   - InFlight 是各账号在途请求数之和（运行态观测，不参与任何判定）。
+//
+// realm=="" 退化为全池（现状语义）。调用方无需持锁。
+type RealmHealth struct {
+	Total          int
+	Healthy        int
+	Cooling        int
+	Disabled       int
+	InFlightFull   int
+	Breaker        int
+	Degraded       int
+	ManualDisabled int
+	ModelCooled    int
+	InFlight       int
+}
+
+// RealmHealth 返回指定 realm 的健康度分解；realm=="" 统计全池。
+func (p *Pool) RealmHealth(realm string) RealmHealth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	var h RealmHealth
 	for _, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		total++
+		h.Total++
 		switch {
 		// 手动停用与自动禁用同归 disabled 计数：对「多少号不参与选号」这个运维
 		// 问题二者等价，分开会让 total/healthy/cooling/disabled 不闭合。
 		// 具体是哪一种看 /status 账号级的 manual_disabled/disabled 两位。
 		case e.disabled || e.manualDisabled:
-			disabled++
+			h.Disabled++
 		case !e.healthy(now):
-			cooling++
+			h.Cooling++
 		default:
-			healthy++
+			h.Healthy++
 			if p.inFlightFull(e) {
-				inFlightFull++
+				h.InFlightFull++
 			}
 		}
+		if e.manualDisabled {
+			h.ManualDisabled++
+		}
+		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
+			h.Breaker++
+		}
+		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
+			h.Degraded++
+		}
+		for _, mc := range e.modelCooldowns {
+			if !mc.Until.IsZero() && now.Before(mc.Until) {
+				h.ModelCooled++
+				break
+			}
+		}
+		h.InFlight += int(e.inFlight.Load())
 	}
-	return total, healthy, cooling, disabled, inFlightFull
+	return h
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个（对任意模型）healthy 且未占满在途名额的账号。
@@ -457,6 +579,28 @@ func (p *Pool) List() []Status {
 	}
 	return out
 }
+
+// timePtrIfSet 把零值时间折叠成 nil：供 Status 的 *time.Time 字段使用。nil 才能被
+// omitempty 真正省略（非指针 time.Time 的零值会写出 0001-01-01T00:00:00Z，
+// 见 entry.go 里 BreakerUntil 的同一注释）。
+func timePtrIfSet(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// credWrittenAtOf 读凭证文件 mtime；不可 stat（文件不存在/无权限/FilePath 空）时
+// 返回 nil。nil + `omitempty` = 键不输出，语义是"未知"，而不是"1970 年写的"——
+// 后者会让巡检脚本把它算成一个 55 年没更新的僵尸账号。
+func credWrittenAtOf(a *auth.Auth) *time.Time {
+	t, ok := a.CredWrittenAt()
+	if !ok || t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	// reason 过期清理：非 disabled 账号若 until 已过期/零值，reason 清空（与落盘
@@ -473,6 +617,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 条目），运维据此自查「为什么总选它」；只读遍历零风险，过期即消失。
 		ModelCosts: p.modelCostsStatusLocked(e, now),
 		Realm:             e.a.Realm(),
+		Groups:            e.a.GroupsValue(),
 		Nickname:          e.a.Nickname,
 		Credits:           e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
@@ -492,7 +637,25 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:          int(e.inFlight.Load()),
 		BreakerFails:      e.fails,
 		BreakerUntil:      e.breakerUntil,
+		// —— 凭证健康（P0-1）——
+		// TokenExpiresAt 从 **Auth 对象**读（加锁），而不是去 stat auths/*.json：
+		// 进程内的 ExpiresAt 才是续期/选号真正用的值，文件是它的上一次快照。
+		// 两者不一致时以进程内为准——这正是控制台"显示已过期却还能用"的根源。
+		TokenExpiresAt:    e.a.ExpiresAtValue(),
+		CredWrittenAt:     credWrittenAtOf(e.a),
+		RefreshOKAt:       timePtrIfSet(e.refreshOKAt),
+		RefreshFailStreak: e.refreshFailStreak,
+		SessionDeadFails:  e.sessionDeadFails,
+		LastRefreshErr:    e.lastRefreshErr,
 	}
+	// TokenExpired 与 NeedsRelogin 都是派生量（由上面已赋值的字段推出），放在
+	// 字面量之后算：写进字面量里会在字段求值顺序上依赖 Go 的求值语义，可读性也差。
+	st.TokenExpired = st.TokenExpiresAt > 0 && st.TokenExpiresAt <= now.Unix()
+	// NeedsRelogin 判据：已 disabled **且** 死因是 12153 —— 这类账号的 refresh token
+	// 已失效，revive 只会让它立刻再死一次，只有重新登录（换 refresh token）能救。
+	// 用 Contains 而非 == 常量：state.json 是持久化的，历史上/手工写入的 reason
+	// 文案可能有前后缀（"12153 session dead"/"上游 12153"），精确匹配会漏判。
+	st.NeedsRelogin = st.Disabled && (st.SessionDeadFails > 0 || strings.Contains(e.reason, "12153"))
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason
