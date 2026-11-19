@@ -16,6 +16,16 @@ type Pool struct {
 	byUID   map[string]*entry
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
+	// order 运维在控制台拖拽/上下移动后的账号展示顺序（uid 列表）。
+	// 只影响 List() 的输出顺序（控制台列表、模型页账号下拉、调度遍历），
+	// 不改变选号算法——权重随机仍是路由唯一依据，排序不是优先级。
+	// 持久化到 state.json 的 account_order 键；未列入的账号按 uid 升序追加在末尾，
+	// 因此新账号/旧状态文件天然向后兼容，不需要额外迁移。
+	order []string
+	// reauth 正在重新登录（凭证即将被替换）的账号集合。运行态、不持久化。
+	// 调度器刷新 token 前必须查它：重登期间用旧 refresh token 续期会轮换出
+	// 一套被丢弃的凭证，可能让刚换到手的新 refresh token 失效。
+	reauth map[string]bool
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
 	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
 	store StoreSnapshotter
@@ -77,6 +87,7 @@ func New(stateFp string) *Pool {
 	p := &Pool{
 		byUID:              map[string]*entry{},
 		stateFp:            stateFp,
+		reauth:             map[string]bool{},
 		breakerThreshold:   defaultBreakerThreshold,
 		breakerCooldown:    defaultBreakerCooldown,
 		breakerCooldownMax: defaultBreakerCooldownMax,
@@ -290,10 +301,12 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	for uid := range p.byUID {
 		if !seen[uid] {
 			delete(p.byUID, uid)
+			delete(p.reauth, uid)
 			changed = true
 		}
 	}
 	if changed {
+		p.pruneOrderLocked()
 		p.saveLocked()
 	}
 }

@@ -81,6 +81,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	model, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, model))
 	normalizeReasoningEffort(obj, efforts)
+	// WorkBuddy 读取历史 assistant 消息的 reasoning；兼容常见客户端字段。
+	mirrorAssistantReasoning(obj)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)

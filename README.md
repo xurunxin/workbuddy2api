@@ -68,7 +68,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
 - **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
-- **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：**管理控制台 → 账号管理**的「临时停用 / 恢复 / 复活」按钮（可填停用原因），底层为控制台 API `POST /admin/api/accounts/{uid}/{manual_disable,manual_enable,revive}`
+- **账号临时停用 / 恢复 / 重新登录 / 排序 / 移除** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。**重新登录**直接复用官方设备授权：流程开始时临时摘出账号、等在途请求排空后替换凭证，完成后恢复原先的停用状态；不再要求账号先被系统禁用。**移除**会删除 `auths` 下的凭证文件并出池（有在途请求时拒绝）。**排序**支持箭头或拖拽，顺序持久化到 `state.json`，只影响控制台展示，不改变三因子加权选号。入口：**管理控制台 → 账号管理**，底层为控制台 API `POST /admin/api/accounts/{uid}/{manual_disable,manual_enable,revive,relogin}`、`PUT /admin/api/accounts/order`、`DELETE /admin/api/accounts/{uid}`
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复
 
 ### 请求链路
@@ -112,7 +112,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
 - 手动签到：`./signin.sh`（批量、幂等不重复计）
-- 账号停用 / 恢复：**管理控制台 → 账号管理**（「临时停用 / 恢复 / 复活」按钮，可填停用原因）；也可直接调 `POST /admin/api/accounts/{uid}/{manual_disable,manual_enable,revive}`（需控制台登录会话 + CSRF）
+- 账号停用 / 恢复 / 重新登录 / 排序 / 移除：**管理控制台 → 账号管理**；也可直接调 `POST /admin/api/accounts/{uid}/{manual_disable,manual_enable,revive,relogin}`、`PUT /admin/api/accounts/order`、`DELETE /admin/api/accounts/{uid}`（需控制台登录会话 + CSRF）
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
 
@@ -191,11 +191,11 @@ docker compose -f docker-compose.yml -f docker-compose.bind.yml up -d --build
 ### Web 管理与配置生效
 
 - 管理入口 `/admin/`，会话有效期 12 小时。服务重启后需要重新登录；未设置管理密码时管理 API 不可使用。
-- 管理台展示账号数量、冷却 / 停用 / 并发状态、积分与查询时间。积分是缓存快照，点击刷新才查询上游；查询失败不会把原余额写为零。健康状态不代表已验证真实模型生成。
+- 管理台展示账号数量、冷却 / 停用 / 并发状态、积分与查询时间。积分是缓存快照，点击刷新才查询上游；查询失败不会把原余额写为零。健康状态不代表已验证真实模型生成。refresh token 已失效（`needs_relogin`）的账号会标红提示「需重新登录」，这是唯一只能靠重登恢复的状态。
 - 可编辑请求大小、上游超时、提示词模式、定时任务、账号池、冷却和会话设置。接入密钥在「API Key」页独立管理，创建和废弃立即生效，无需重启。密码、完整 API 密钥和账号 token 均不从管理查询接口返回。
 - 配置写入 `state_file` 同目录的 `admin-config.json`（默认 `/app/data/admin-config.json`），采用原子写入。基础 `config.json` 可以保持只读挂载。加载顺序为基础配置 → 管理配置 → `WB2A_*` 环境变量；界面会显示环境覆盖项的名称。
 - 保存后点击「重启服务」，Docker 的 `restart: unless-stopped` 会拉起新进程并加载配置。重启会短暂中断服务，超过优雅停机窗口的在途请求会断开；源码直接启动时需手动再次启动进程。
-- `listen`、凭证 / 状态目录、Redis 连接和管理密码属于部署配置，通过文件或环境变量修改。账号可停用或重新启用；重新授权已有账号前，先停用并等待在途请求结束。
+- `listen`、凭证 / 状态目录、Redis 连接和管理密码属于部署配置，通过文件或环境变量修改。账号可停用、重新启用、重新登录、排序或移除；重新登录会在账号行内完成，自动等待在途请求结束后替换凭证。
 
 ### 模型选择与积分倍率
 
@@ -331,12 +331,15 @@ curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
 # 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位）
 curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
 
-# 临时停用 / 恢复 / 复活一个账号
+# 临时停用 / 恢复 / 复活 / 重新登录 / 排序 / 移除一个账号
 # 推荐走管理控制台「账号管理」页的按钮（可填停用原因，见下方控制台章节）。
 # 脚本化调用控制台 API 时需带上登录会话 Cookie 与 X-CSRF-Token（同源写操作强制）：
-#   POST /admin/api/accounts/<uid>/manual_disable  {"reason":"观察几天"}
-#   POST /admin/api/accounts/<uid>/manual_enable   只解手动位
-#   POST /admin/api/accounts/<uid>/revive          只解系统自动禁用位
+#   POST   /admin/api/accounts/<uid>/manual_disable  {"reason":"观察几天"}
+#   POST   /admin/api/accounts/<uid>/manual_enable   只解手动位
+#   POST   /admin/api/accounts/<uid>/revive          只解系统自动禁用位
+#   POST   /admin/api/accounts/<uid>/relogin         重新走官方授权替换凭证（自动等在途请求排空）
+#   PUT    /admin/api/accounts/order                 {"uids":["u2","u1"]} 保存展示顺序
+#   DELETE /admin/api/accounts/<uid>                 删除凭证文件并移除账号（有在途请求时 409）
 
 # 流式聊天
 curl -sN http://localhost:7863/v1/chat/completions \
@@ -376,6 +379,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
 | `schedule.keepalive_enabled` | `true` | token 保活总开关 |
+| `schedule.retry_delay_minutes` | `0` | 失败重试延迟（分钟）；`0` 关闭，最大 `1440`（24 小时延迟必跨日，不会排期） |
+| `schedule.retry_max_per_day` | `1` | 每类任务每个 CST 自然日最多安排的重试次数；`0` 关闭 |
+| `schedule.ledger_file` | 空 | 任务台账及重试计数保存路径；空时仅在内存中保存 |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
@@ -395,6 +401,22 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
+
+### 定时失败重试
+
+默认 `retry_delay_minutes` 为 `0`，未配置时不会自动重试。需要启用时，在配置文件的 `schedule` 中加入例如：
+
+```json
+"retry_delay_minutes": 15,
+"retry_max_per_day": 1,
+"ledger_file": "./data/task-ledger.json"
+```
+
+这会在当日（CST）最多安排每类任务一次、延迟 15 分钟的重试；跨日的重试不会安排。签到按账号处理：定时签到请求遇到网络错误、HTTP 5xx 或 HTTP 2xx 响应中的业务码 `10000` 时，只对这些失败账号重试；部分账号成功也可安排重试。认证、限流、其他业务错误及签到成功后余额查询失败不会触发签到重试。人工签到不会新增重试，人工签到成功会从等待名单中移除该账号。签到已成功或上游报告已签到均视为成功。上游可能已完成签到但响应丢失；重试依赖上游“已签到”行为，不能保证请求恰好执行一次。
+
+其他任务沿用原策略：仅整轮失败时重试，可能重复执行整轮（包括脚本内已经完成的动作）；人工触发不自动重试。重试额度在排期时消耗，未到时间的已有排期不会被后续轮次覆盖。普通签到轮次会更新等待的失败账号名单，名单为空时到点只消费排期而不发请求。
+
+设置可写的 `ledger_file` 可在重启后保留台账、重试排期和每日额度，写入失败只记日志。签到失败账号名单仅保存在进程内：重启后旧签到重试到点会被跳过，不会对全体账号重跑；已消费的重试在执行中断或进程退出后也不会自动恢复。空路径或台账写入失败时，重启后排期和额度也可能丢失。
 
 ### 上游超时语义（三段各归其位）
 
@@ -444,7 +466,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|---|
 | 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
 | 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时**冷却到上游重置墙钟并豁免切模型（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
-| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 人工重新登录（`login.sh`）或 `ReviveDisabled` 复活 |
+| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 控制台「重新登录」（或 `login.sh`）替换 refresh token；非 12153 的禁用可「复活」 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
 | 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
@@ -702,8 +724,9 @@ curl http://localhost:7863/v1/images/edits \
 ### 账号管理
 
 - 多账号复制 `auths/workbuddy-<uid>.json` 即可，池启动时自动对齐目录
-- Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用 `./login.sh` 重新登录覆盖凭证；已持久化 `disabled=true` 的账号可在源码侧调用 `Pool.ReviveDisabled(uid)` 复活（`state.json` 中清除 `disabled` 标志）
-- 备份 = auths 卷（凭证）+ data 卷（池状态与 `admin-config.json`）+ 基础配置及 `.env`；配置 Upstash 后池状态另镜像至 Redis（7 天 TTL），管理配置仍在本地数据卷
+- 控制台「账号管理」页支持：**重新登录**（任何状态的已有账号都能重走官方授权；流程开始即临时摘出选号池，排在途请求结束后替换凭证，完成后恢复原先的停用状态）、**排序**（箭头或拖拽，顺序落盘 `state.json`，仅影响展示）、**移除**（删除凭证文件并出池，有在途请求时拒绝）
+- Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用控制台「重新登录」直接替换凭证；也可用 `./login.sh` 重新登录覆盖凭证（脚本直接写 `auths` 文件，目录热加载生效）。已持久化 `disabled=true` 的账号还可用控制台「复活」（源码侧等价 `Pool.ReviveDisabled(uid)`，清 `state.json` 的 `disabled` 标志）
+- 备份 = auths 卷（凭证）+ data 卷（池状态、`account_order` 与 `admin-config.json`）+ 基础配置及 `.env`；配置 Upstash 后池状态另镜像至 Redis（7 天 TTL），管理配置仍在本地数据卷
 
 ## 安全与合规
 

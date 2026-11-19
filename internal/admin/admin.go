@@ -73,6 +73,9 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("PUT /admin/api/config", h.authorize(h.saveConfig))
 	h.mux.HandleFunc("POST /admin/api/restart", h.authorize(h.restart))
 	h.mux.HandleFunc("POST /admin/api/accounts/import", h.authorize(h.importAccount))
+	h.mux.HandleFunc("PUT /admin/api/accounts/order", h.authorize(h.reorderAccounts))
+	h.mux.HandleFunc("DELETE /admin/api/accounts/{uid}", h.authorize(h.removeAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/relogin", h.authorize(h.startRelogin))
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/models", h.authorize(h.accountModels))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/models/refresh", h.authorize(h.accountModels))
 	h.mux.HandleFunc("GET /admin/api/keys", h.authorize(h.listKeys))
@@ -168,6 +171,9 @@ func (h *Handler) cleanupLocked() {
 	for k, f := range h.logins {
 		s, sessionExists := h.sessions[f.owner]
 		if !f.expires.After(now) || !sessionExists || !s.expires.After(now) {
+			// 过期的重新登录流程也要把临时摘除的账号放回原状态，否则账号会被
+			// 永久留在"重新登录中"的手动停用位里。
+			h.releaseFlowHoldLocked(f)
 			delete(h.logins, k)
 		}
 	}
@@ -252,6 +258,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	delete(h.sessions, id)
 	for k, f := range h.logins {
 		if f.owner == id {
+			h.releaseFlowHoldLocked(f)
 			delete(h.logins, k)
 		}
 	}

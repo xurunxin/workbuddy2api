@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -564,20 +565,135 @@ func (p *Pool) servableLocked(realm string) bool {
 	return false
 }
 
-// List 返回所有账号状态（按 UID 排序，稳定输出）。
+// List 返回所有账号状态（按运维设置的展示顺序，未列入顺序的账号按 UID 追加）。
 func (p *Pool) List() []Status {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	uids := make([]string, 0, len(p.byUID))
-	for uid := range p.byUID {
-		uids = append(uids, uid)
-	}
-	sort.Strings(uids)
+	uids := p.orderedUIDsLocked()
 	out := make([]Status, 0, len(uids))
 	for _, uid := range uids {
 		out = append(out, p.statusOf(uid, p.byUID[uid]))
 	}
 	return out
+}
+
+// orderedUIDsLocked 返回当前账号的展示顺序：先按 p.order（只含仍存在的账号），
+// 再把未列入的账号按 UID 升序追加。调用方必须已持有 p.mu（读锁即可）。
+func (p *Pool) orderedUIDsLocked() []string {
+	uids := make([]string, 0, len(p.byUID))
+	seen := make(map[string]bool, len(p.byUID))
+	for _, uid := range p.order {
+		if seen[uid] {
+			continue
+		}
+		if _, ok := p.byUID[uid]; !ok {
+			continue
+		}
+		seen[uid] = true
+		uids = append(uids, uid)
+	}
+	rest := make([]string, 0, len(p.byUID)-len(uids))
+	for uid := range p.byUID {
+		if !seen[uid] {
+			rest = append(rest, uid)
+		}
+	}
+	sort.Strings(rest)
+	return append(uids, rest...)
+}
+
+// Reorder 设置账号展示顺序。uids 必须是当前池内账号的子集（可只给部分账号，
+// 未列出的账号按原顺序追加在末尾）；未知 UID 或重复 UID 会被拒绝，避免前端
+// 传错列表后出现"账号凭空消失"的假象。返回规整后的完整顺序。
+//
+// 语义边界：排序只影响 List()/控制台展示与调度遍历顺序，不参与选号权重——
+// 三因子加权随机仍是路由唯一依据。把排序说成优先级会让运维误以为排第一的号
+// 一定先被选中，实际不会。
+func (p *Pool) Reorder(uids []string) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		if seen[uid] {
+			return nil, fmt.Errorf("账号 %s 重复", uid)
+		}
+		if _, ok := p.byUID[uid]; !ok {
+			return nil, fmt.Errorf("账号 %s 不存在", uid)
+		}
+		seen[uid] = true
+	}
+	order := make([]string, 0, len(p.byUID))
+	order = append(order, uids...)
+	for _, uid := range p.orderedUIDsLocked() {
+		if !seen[uid] {
+			order = append(order, uid)
+		}
+	}
+	p.order = order
+	p.dirty.Store(true)
+	return append([]string(nil), order...), nil
+}
+
+// RemoveAccount 从池中移除账号（凭证文件的删除由调用方负责）。
+// 返回 (found, busy)：账号不存在 → (false,false)；仍有在途请求 → (true,true) 且
+// **不移除**——删掉 entry 会让 Release 找不到账号，在途请求的收尾（积分/冷却
+// 记账）落在空处，运维也会看到"删了但请求还在跑"的竞态。宁可让调用方稍后重试。
+func (p *Pool) RemoveAccount(uid string) (found, busy bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false, false
+	}
+	if e.inFlight.Load() > 0 {
+		return true, true
+	}
+	delete(p.byUID, uid)
+	p.pruneOrderLocked()
+	delete(p.reauth, uid)
+	p.dirty.Store(true)
+	return true, false
+}
+
+// BeginReauth 标记账号正在重新登录（凭证即将被替换）。调度器的 token 刷新
+// （keepalive / 签到预刷新 / 活跃上报预刷新）看到该标记必须跳过：重登期间用
+// 旧 refresh token 轮换出的新凭证会被丢弃，可能反过来让刚换到的新 token 失效。
+// 运行态标记，不持久化——进程重启后没有进行中的重登，标记自然消失。
+func (p *Pool) BeginReauth(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reauth == nil {
+		p.reauth = map[string]bool{}
+	}
+	p.reauth[uid] = true
+}
+
+// EndReauth 清除重新登录标记（成功/取消/过期都要调，幂等）。
+func (p *Pool) EndReauth(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.reauth, uid)
+}
+
+// Reauthenticating 报告账号是否正在重新登录。调度器刷新 token 前调用。
+func (p *Pool) Reauthenticating(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reauth[uid]
+}
+
+// pruneOrderLocked 清理 order 中已不存在的账号。调用方必须已持有 p.mu 写锁。
+func (p *Pool) pruneOrderLocked() {
+	if len(p.order) == 0 {
+		return
+	}
+	kept := p.order[:0]
+	for _, uid := range p.order {
+		if _, ok := p.byUID[uid]; ok {
+			kept = append(kept, uid)
+		}
+	}
+	p.order = kept
 }
 
 // timePtrIfSet 把零值时间折叠成 nil：供 Status 的 *time.Time 字段使用。nil 才能被

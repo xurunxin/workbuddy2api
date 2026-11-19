@@ -13,13 +13,13 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
-	"x-anthropic-billing-header", // header 键值段键名
-	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
-	"You are Claude Code",        // 身份句（截断前缀即可命中）
-	"Main branch (",              // 注入指令句（截断前缀即可命中）
+	"x-anthropic-billing-header",                      // header 键值段键名
+	"cc_entrypoint=",                                  // 尾随裸键值（截断前缀即可命中）
+	"You are Claude Code",                             // 身份句（截断前缀即可命中）
+	"Main branch (",                                   // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-	"11128",                      // 上游反探测：裸数字错误码
+	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"11128",                                           // 上游反探测：裸数字错误码
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -176,7 +176,7 @@ func sanitizeToolCalls(v any) bool {
 	return changed
 }
 
-// sanitizeMessages 净化 messages 中的 content、reasoning_content 与 tool_calls；任一命中返回 true。
+// sanitizeMessages 净化消息内容、推理文本和工具参数；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false
 	for _, msg := range messages {
@@ -192,12 +192,27 @@ func sanitizeMessages(messages []any) bool {
 				changed = true
 			}
 		}
-		// reasoning_content（思维链回填字段，见 thinking.go/sse.go）实测同样
-		// 携带指纹，与 content 同等净化。string 形态直接走 sanitizeText。
-		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeText(rc); s != rc {
-				m["reasoning_content"] = s
-				changed = true
+		// 镜像后的 reasoning 和原始字段都会发送上游，需要分别净化。
+		for _, key := range []string{"reasoning_content", "reasoning"} {
+			if text, ok := m[key].(string); ok {
+				if clean := sanitizeText(text); clean != text {
+					m[key] = clean
+					changed = true
+				}
+			}
+		}
+		if details, ok := m["reasoning_details"].([]any); ok {
+			for _, raw := range details {
+				if detail, ok := raw.(map[string]any); ok {
+					for _, key := range []string{"text", "summary"} {
+						if text, ok := detail[key].(string); ok {
+							if clean := sanitizeText(text); clean != text {
+								detail[key] = clean
+								changed = true
+							}
+						}
+					}
+				}
 			}
 		}
 		if tc, ok := m["tool_calls"]; ok {

@@ -157,6 +157,9 @@
             「临时停用」只把账号摘出选号池，账号仍留在池内：签到、token 保活与排程照常执行，
             随时可以「恢复」放回选号。它与系统自动判定的「已禁用」是两个独立的位——
             自动禁用需要点「复活」才会解除，两个位都清空后账号才回到选号。
+            「重新登录」用于 refresh token 失效或凭证过期：会临时摘出账号、等待在途请求结束后替换凭证，
+            完成后恢复原先的停用状态；「移除」会删除凭证文件且不可恢复。
+            列表顺序可用箭头或拖拽调整，仅影响控制台展示，不改变选号权重。
           </p>
           <div class="panel table-panel">
             <div id="accounts-empty" class="empty" hidden>
@@ -167,6 +170,7 @@
               <table>
                 <thead>
                   <tr>
+                    <th class="drag-col" aria-label="拖拽排序"></th>
                     <th>账号</th>
                     <th>积分</th>
                     <th>状态</th>
@@ -184,7 +188,7 @@
               <div class="panel-head">
                 <div>
                   <h2>导入账号 JSON</h2>
-                  <p>用于迁移或恢复已有账号。首次使用可直接选择“添加授权账号”，无需准备文件。</p>
+                  <p>用于迁移或恢复已有账号。首次使用可直接选择“添加授权账号”，无需准备文件。活跃账号不会被导入静默覆盖；更新凭证请用账号行的「重新登录」。</p>
                 </div>
               </div>
               <details class="import-guide">
@@ -219,7 +223,7 @@
               <div class="panel-head">
                 <div>
                   <h2>浏览器授权</h2>
-                  <p>在官方页面登录，完成后账号会自动加入列表。</p>
+                  <p>在官方页面登录，完成后新账号自动加入列表、已有账号自动更新凭证。</p>
                 </div>
               </div>
               <div id="oauth-idle">
@@ -607,6 +611,16 @@
         <div class="dialog-actions">
           <button class="button secondary" value="cancel">取消</button>
           <button class="button danger" id="key-revoke-confirm" value="confirm">确认废弃</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="account-remove-dialog" class="restart-dialog" aria-labelledby="account-remove-title">
+      <form method="dialog">
+        <h2 id="account-remove-title">确认移除账号</h2>
+        <p id="account-remove-message">将删除该账号的凭证文件并从账号池移除，操作不可恢复（历史用量统计会保留）。确定继续吗？</p>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button>
+          <button class="button danger" id="account-remove-confirm" value="confirm">确认移除</button>
         </div>
       </form>
     </dialog>

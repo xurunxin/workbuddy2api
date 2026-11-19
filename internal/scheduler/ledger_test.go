@@ -84,7 +84,7 @@ func TestRecordRunManualNeverArmsRetry(t *testing.T) {
 
 	// 同一份计数换成定时轮次 → 排上。重试基准是**本轮结束时刻**（实际跑完那一刻），
 	// 不是入参里的 started——「延迟 N 分钟后再跑」针对的是跑完，不是开始。
-	s.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 3, fail: 3})
+	s.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 3, fail: 3, retryableCheckin: true})
 	r := s.Ledger().Runs()["checkin"]
 	armed := s.Ledger().ArmedRetries(r.Finished)
 	at, ok := armed["checkin"]
@@ -112,7 +112,7 @@ func TestRecordRunNoRetryWhenNotAllFailed(t *testing.T) {
 func TestRecordRunRetryDisabledByDefault(t *testing.T) {
 	s := ledgerScheduler(Config{})
 	now := fixedNow(9, 0)
-	r := s.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 3, fail: 3})
+	r := s.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 3, fail: 3, retryableCheckin: true})
 	if !r.AllFailed {
 		t.Error("台账仍应记下全灭（观测与重试是两件事）")
 	}
@@ -429,7 +429,7 @@ func TestLedgerRetryStatePersisted(t *testing.T) {
 
 	s1 := ledgerScheduler(cfg)
 	now := time.Now()
-	s1.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 2, fail: 2})
+	s1.recordRun(taskCheckin, triggerSchedule, now, runTally{total: 2, fail: 2, retryableCheckin: true})
 	if len(s1.Ledger().ArmedRetries(now)) != 1 {
 		t.Fatal("测试前提：应已排一次重试")
 	}

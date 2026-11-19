@@ -43,6 +43,9 @@
       inFlight: false,
     },
     keyToRevoke: null,
+    accountToRemove: null,
+    dragUid: "",
+    orderSaving: false,
     sessionEpoch: 0,
     copyFallback: null,
   };
@@ -236,6 +239,9 @@
     state.keys.loaded = false;
     state.keys.inFlight = false;
     state.keyToRevoke = null;
+    state.accountToRemove = null;
+    state.dragUid = "";
+    state.orderSaving = false;
     $("password").value = "";
     $("import-json").value = "";
     $("import-file").value = "";
@@ -306,8 +312,11 @@
   }
   // accountBadge 判定账号的展示态。手动停用（manual_disabled）与系统自动禁用
   // （disabled）是**两个独立的位**，文案必须分开——否则运维看到「已停用」会以为
-  // 是自己摘的，点「恢复」却没反应（实际要靠 revive 解自动位）。
+  // 是自己摘的，点「恢复」却没反应（实际要靠 revive 解自动位）。refresh token
+  // 已失效（needs_relogin）时 highlight「需重新登录」：这是唯一只能靠重登恢复
+  // 的状态，revive 救不回来。
   function accountBadge(a) {
+    if (a.needs_relogin) return ["需重新登录", "relogin"];
     if (a.manual_disabled) return ["已临时停用", "manual"];
     if (a.disabled) return ["已禁用", "disabled"];
     if (a.cooling)
@@ -319,8 +328,50 @@
     clearChildren(body);
     $("accounts-empty").hidden = accounts.length !== 0;
     document.querySelector("#accounts-view .table-wrap").hidden = accounts.length === 0;
-    accounts.forEach((a) => {
+    accounts.forEach((a, index) => {
       const tr = document.createElement("tr");
+      tr.dataset.uid = a.uid;
+      tr.draggable = true;
+      tr.classList.toggle("dragging", state.dragUid === a.uid);
+      tr.addEventListener("dragstart", (event) => {
+        // 只有从把手开始拖才移动整行：否则选中文字/点按钮也会触发 dragstart。
+        if (!event.target.closest(".drag-handle")) {
+          event.preventDefault();
+          return;
+        }
+        state.dragUid = a.uid;
+        tr.classList.add("dragging");
+        event.dataTransfer.effectAllowed = "move";
+        try {
+          event.dataTransfer.setData("text/plain", a.uid);
+        } catch (_) {}
+      });
+      tr.addEventListener("dragend", () => {
+        state.dragUid = "";
+        tr.classList.remove("dragging");
+        document
+          .querySelectorAll("#accounts-body tr.drag-over")
+          .forEach((el) => el.classList.remove("drag-over"));
+      });
+      tr.addEventListener("dragover", (event) => {
+        if (!state.dragUid || state.dragUid === a.uid) return;
+        event.preventDefault();
+        tr.classList.add("drag-over");
+      });
+      tr.addEventListener("dragleave", () => tr.classList.remove("drag-over"));
+      tr.addEventListener("drop", (event) => {
+        event.preventDefault();
+        tr.classList.remove("drag-over");
+        const from = state.dragUid;
+        state.dragUid = "";
+        if (from && from !== a.uid) moveAccountBefore(from, a.uid);
+      });
+      const orderCell = node("td", undefined, "drag-cell");
+      const handle = node("span", "⠿", "drag-handle");
+      handle.title = "拖拽调整账号顺序";
+      handle.setAttribute("aria-hidden", "true");
+      orderCell.append(node("span", String(index + 1), "order-index"), handle);
+      tr.append(orderCell);
       const who = node("td");
       const box = node("div", undefined, "account-name");
       box.append(node("strong", a.nickname || "未命名账号"));
@@ -346,6 +397,11 @@
       if (a.manual_disabled) {
         statusCell.append(
           node("small", a.manual_reason ? `手动摘除：${a.manual_reason}` : "手动摘除", "status-detail manual-line"),
+        );
+      }
+      if (a.needs_relogin) {
+        statusCell.append(
+          node("small", "refresh token 已失效，请点「重新登录」", "status-detail relogin-line"),
         );
       }
       const detail = a.disabled
@@ -387,6 +443,12 @@
       credit.type = "button";
       credit.addEventListener("click", () => accountAction(a.uid, "credits"));
       actionBox.append(credit);
+      // 重新登录：任何状态都可点（活跃号会临时摘出选号池，等在途请求结束后替换）。
+      const relogin = node("button", "重新登录", "mini-button relogin-button");
+      relogin.type = "button";
+      relogin.title = "重新走官方授权并替换该账号凭证；完成后恢复原先的停用状态";
+      relogin.addEventListener("click", () => startRelogin(a.uid));
+      actionBox.append(relogin);
       // 暂停/恢复：只动 manual_disabled 位。健康号给「临时停用」，已手动摘除的号
       // 给「恢复」。自动禁用的号不显示停用按钮——它已经在池外，再摘一次没有意义。
       if (a.manual_disabled) {
@@ -398,6 +460,27 @@
       if (a.disabled) {
         actionBox.append(accountButton("复活", "revive", a.uid));
       }
+      // 排序：上移/下移是拖拽的键盘/触屏等价入口（表格在窄屏上拖拽不稳）。
+      const ordering = node("div", undefined, "order-buttons");
+      const up = node("button", "↑", "mini-button icon-button");
+      up.type = "button";
+      up.title = "上移";
+      up.setAttribute("aria-label", `上移 ${a.nickname || a.uid}`);
+      up.disabled = index === 0 || state.orderSaving;
+      up.addEventListener("click", () => moveAccountBy(a.uid, -1));
+      const down = node("button", "↓", "mini-button icon-button");
+      down.type = "button";
+      down.title = "下移";
+      down.setAttribute("aria-label", `下移 ${a.nickname || a.uid}`);
+      down.disabled = index === accounts.length - 1 || state.orderSaving;
+      down.addEventListener("click", () => moveAccountBy(a.uid, 1));
+      ordering.append(up, down);
+      actionBox.append(ordering);
+      const remove = node("button", "移除", "mini-button remove-button");
+      remove.type = "button";
+      remove.title = "删除凭证文件并移出账号池";
+      remove.addEventListener("click", () => openAccountRemove(a));
+      actionBox.append(remove);
       actions.append(actionBox);
       tr.append(actions);
       body.append(tr);
@@ -409,6 +492,109 @@
     button.type = "button";
     button.addEventListener("click", () => accountAction(uid, action));
     return button;
+  }
+  function accountByUID(uid) {
+    return ((state.status && state.status.accounts) || []).find((a) => a.uid === uid) || null;
+  }
+  // startRelogin 为已有账号重走官方授权。服务端会先把账号临时摘出选号池，
+  // 等在途请求结束后替换凭证，并恢复账号原先的手动停用状态。
+  async function startRelogin(uid) {
+    if (state.oauthChecking) return;
+    if (state.oauth) {
+      notice("已有授权流程正在进行，请先完成或取消当前授权", true);
+      setView("accounts");
+      $("oauth-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (state.oauthNeedsRestore) {
+      await restoreOAuth(true);
+      if (state.oauth) {
+        notice("已有授权流程正在进行，请先完成或取消当前授权", true);
+        return;
+      }
+    }
+    const account = accountByUID(uid);
+    const name = account ? account.nickname || account.uid : uid;
+    state.oauthChecking = true;
+    oauthButton();
+    try {
+      const out = await api(`accounts/${encodeURIComponent(uid)}/relogin`, {
+        method: "POST",
+        body: "{}",
+      });
+      state.oauthNeedsRestore = false;
+      showOAuth(out);
+      oauthMessage(`正在重新登录 ${name}：请在官方页面完成授权。账号已临时摘出选号池，完成后自动恢复。`);
+      $("oauth-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+    } catch (err) {
+      notice(err.message, true);
+    } finally {
+      state.oauthChecking = false;
+      oauthButton();
+    }
+  }
+  function accountUIDOrder() {
+    return ((state.status && state.status.accounts) || []).map((a) => a.uid);
+  }
+  async function saveAccountOrder(uids) {
+    if (state.orderSaving) return;
+    state.orderSaving = true;
+    let saved = false;
+    try {
+      await api("accounts/order", {
+        method: "PUT",
+        body: JSON.stringify({ uids }),
+      });
+      saved = true;
+    } catch (err) {
+      notice(err.message, true);
+    } finally {
+      // 先解除保存中状态再重绘：否则 renderAccounts 会把上/下移按钮全部置灰，
+      // 直到下一次 20 秒轮询才恢复。
+      state.orderSaving = false;
+    }
+    if (saved) {
+      notice("账号顺序已保存");
+      await loadStatus(true);
+    }
+  }
+  function moveAccountBy(uid, delta) {
+    const uids = accountUIDOrder();
+    const i = uids.indexOf(uid);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= uids.length) return;
+    [uids[i], uids[j]] = [uids[j], uids[i]];
+    saveAccountOrder(uids);
+  }
+  function moveAccountBefore(fromUID, targetUID) {
+    const uids = accountUIDOrder();
+    if (!uids.includes(fromUID) || !uids.includes(targetUID) || fromUID === targetUID) return;
+    uids.splice(uids.indexOf(fromUID), 1);
+    uids.splice(uids.indexOf(targetUID), 0, fromUID);
+    saveAccountOrder(uids);
+  }
+  function openAccountRemove(account) {
+    state.accountToRemove = account;
+    $("account-remove-message").textContent =
+      `将删除「${account.nickname || account.uid}」的凭证文件并从账号池移除，操作不可恢复（历史用量统计会保留）。确定继续吗？`;
+    const dialog = $("account-remove-dialog");
+    dialog.returnValue = "";
+    if (!dialog.open) dialog.showModal();
+  }
+  async function removeAccount() {
+    const account = state.accountToRemove;
+    state.accountToRemove = null;
+    if (!account) return;
+    try {
+      await api(`accounts/${encodeURIComponent(account.uid)}`, {
+        method: "DELETE",
+        body: "{}",
+      });
+      notice(`账号 ${account.nickname || account.uid} 已移除`);
+      await loadStatus(true);
+    } catch (err) {
+      notice(err.message, true);
+    }
   }
   function clearCopyFallback() {
     if (state.copyFallback && state.copyFallback.parentNode) {
@@ -1139,10 +1325,16 @@
   }
   function showOAuth(out, restored = false) {
     if (out.status === "completed") {
+      const relogin = Boolean(out.relogin || out.target_uid);
+      const name = out.nickname || out.uid;
       stopOAuth();
       if (state.oauthCompletedID !== out.id) {
         state.oauthCompletedID = out.id;
-        oauthMessage(`授权完成：${out.nickname || out.uid}。账号已加入列表，可刷新积分。`);
+        oauthMessage(
+          relogin
+            ? `重新登录完成：${name}。凭证已更新，账号已恢复原先的停用状态。`
+            : `授权完成：${name}。账号已加入列表，可刷新积分。`,
+        );
         loadStatus(true);
       }
       return;
@@ -1150,10 +1342,11 @@
     let flow = state.oauth;
     if (!flow || flow.id !== out.id) {
       stopOAuth();
-      flow = { id: out.id, timer: null, inFlight: false, nextPoll: 0 };
+      flow = { id: out.id, timer: null, inFlight: false, nextPoll: 0, targetUID: out.target_uid || "" };
       state.oauth = flow;
       flow.timer = setInterval(() => pollOAuth(flow), 1000);
     }
+    flow.targetUID = out.target_uid || flow.targetUID || "";
     flow.expires = new Date(out.expires_at).getTime();
     flow.status = out.status;
     flow.interval = Math.max(3, out.poll_interval_seconds || 3) * 1000;
@@ -1166,8 +1359,10 @@
     oauthMessage(out.status === "starting"
       ? "正在获取官方授权链接，请稍候。刷新页面后也会继续恢复。"
       : restored
-        ? "已恢复未完成的授权。可重新打开授权页面，完成后将自动添加账号。"
-        : "等待你在官方页面完成授权。完成后请返回这里，控制台会自动检测结果。");
+        ? "已恢复未完成的授权。可重新打开授权页面，完成后会自动处理账号。"
+        : flow.targetUID
+          ? "等待你在官方页面完成授权。账号已临时摘出选号池，完成后自动替换凭证并恢复。"
+          : "等待你在官方页面完成授权。完成后请返回这里，控制台会自动检测结果。");
     oauthButton();
     updateOAuthCountdown(flow);
   }
@@ -1246,18 +1441,34 @@
       });
       if (state.oauth !== flow) return;
       if (out.status === "completed") {
+        const relogin = Boolean(out.relogin || out.target_uid || flow.targetUID);
+        const name = out.nickname || out.uid;
         stopOAuth(flow);
         state.oauthCompletedID = flow.id;
-        oauthMessage(`授权完成：${out.nickname || out.uid}。账号已加入列表，可刷新积分。`);
+        oauthMessage(
+          relogin
+            ? `重新登录完成：${name}。凭证已更新，账号已恢复原先的停用状态。`
+            : `授权完成：${name}。账号已加入列表，可刷新积分。`,
+        );
         await loadStatus(true);
       } else {
-        oauthMessage("正在等待官方授权确认，控制台会自动检测。也可点击“我已完成授权，立即检测”。");
+        oauthMessage(
+          out.message ||
+            (flow.targetUID
+              ? "正在等待官方授权确认。账号已临时摘出选号池，完成后自动替换凭证。"
+              : "正在等待官方授权确认，控制台会自动检测。也可点击“我已完成授权，立即检测”。"),
+        );
       }
     } catch (err) {
       if (state.oauth === flow) {
         if (err.status === 404) {
           stopOAuth(flow);
           oauthMessage("授权已过期或已在其他页面取消，请重新开始。", true);
+        } else if (err.status === 409 && err.message.includes("不一致")) {
+          // 登错号是终态：服务端已终止流程并恢复账号，不再轮询。
+          stopOAuth(flow);
+          oauthMessage(err.message, true);
+          await loadStatus(true);
         } else {
           oauthMessage(`授权状态暂时无法确认：${err.message}；将自动重试。`, true);
         }
@@ -1532,6 +1743,10 @@
   $("key-revoke-dialog").addEventListener("close", () => {
     if ($("key-revoke-dialog").returnValue === "confirm") revokeKey();
     else state.keyToRevoke = null;
+  });
+  $("account-remove-dialog").addEventListener("close", () => {
+    if ($("account-remove-dialog").returnValue === "confirm") removeAccount();
+    else state.accountToRemove = null;
   });
   $("batch-credits").addEventListener("click", batchCredits);
   $("import-button").addEventListener("click", importAccount);

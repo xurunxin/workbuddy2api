@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,8 +64,8 @@ type Config struct {
 	CatDisabled bool
 
 	// RetryDelayMinutes 当日失败重试延迟（分钟）。**0 = 关闭**（缺省，行为与引入前
-	// 逐字一致）。>0 时，某类任务一轮「全灭」后在该延迟后再跑一次（判据见
-	// recordRun 的 AllFailed 注释），当日最多 RetryMaxPerDay 次。
+	// 逐字一致）。>0 时，签到请求瞬时失败按账号重试；其他任务整轮失败才重试。
+	// 各类任务当日最多 RetryMaxPerDay 次。
 	RetryDelayMinutes int
 	// RetryMaxPerDay 每类任务每日最多重试次数。仅 RetryDelayMinutes>0 时生效；
 	// <=0 与关闭等价（由 taskledger.PlanRetry 判为 disabled）。
@@ -90,6 +92,10 @@ type Scheduler struct {
 
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
+	// checkinRetry 仅保存在本进程中，重启后不将旧排期扩展成全账号重试。
+	checkinRetryMu  sync.Mutex
+	checkinRetry    map[string]struct{}
+	checkinRetryDay string
 
 	// ledger 任务执行台账 + 当日失败重试状态（ledger.go）。恒非 nil（New 构造）；
 	// 仅当直接手搓 &Scheduler{}（测试）时才为 nil——此时记台账与重试都是空操作。
@@ -255,6 +261,11 @@ func (k taskKind) String() string {
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
+	return s.nextWakeFrom(now, now)
+}
+
+// nextWakeFrom 分别用排程游标和实际时间计算正常槽位及重试，避免补跑时把重试日期倒拨。
+func (s *Scheduler) nextWakeFrom(now, actual time.Time) (time.Time, []taskKind) {
 	type slot struct {
 		at   time.Time
 		kind taskKind
@@ -285,7 +296,7 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	// 刚启动），此时 earliest 落在过去 → Run 的 timer 立即到期，等价于「立刻补跑」。
 	// 已禁用的任务不参与（用户关掉了它，不该被一次重试悄悄拉起来）。
 	if s.ledger != nil {
-		for name, at := range s.ledger.ArmedRetries(now) {
+		for name, at := range s.ledger.ArmedRetries(actual) {
 			k, ok := kindByName(name)
 			if !ok || s.kindDisabled(k) {
 				continue
@@ -345,8 +356,14 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 
 // Run 主循环，阻塞直到 ctx 取消。
 func (s *Scheduler) Run(ctx context.Context) {
+	cursor := time.Now()
 	for {
-		next, kinds := s.nextWake(time.Now())
+		now := time.Now()
+		// 长时间睡眠只补最近一天，避免过期槽位在恢复后连续轰炸上游。
+		if oldest := now.Add(-24 * time.Hour); cursor.Before(oldest) {
+			cursor = oldest
+		}
+		next, kinds := s.nextWakeFrom(cursor, now)
 		if next.IsZero() {
 			// 六类任务全部禁用：不空转，只等退出信号。
 			<-ctx.Done()
@@ -358,6 +375,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-timer.C:
+			// 待机超过一天时，timer 原先选中的槽位也可能已过期；先重新计算，
+			// 避免先跑过旧槽位，再补最近一天时重复执行同一类任务。
+			if time.Since(next) > 24*time.Hour {
+				continue
+			}
 			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
 			// 迟到唤醒（睡眠跨过槽位时刻，timer 在唤醒瞬间才到期）先等网络宽限：
 			// 唤醒瞬间 DNS 未就绪，零宽限派发等于把唯一一次补跑机会打在注定失败
@@ -365,11 +387,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if !awaitWakeupGrace(ctx, next) {
 				return // ctx 取消：放弃本批，优雅退出
 			}
-			// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
-			// 54 号 × 5 条 ≈ 7-8 分钟睡眠）不再阻塞同槽其他任务族；返回前
-			// 等全部任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠
-			// 的风险与串行版相同——nextWake 只挑现在之后的时点）。
+			// 同槽并行、批次串行；从已处理槽位继续计算，补跑执行期间到点的任务。
 			s.runBatch(ctx, kinds)
+			if next.After(cursor) {
+				cursor = next
+			}
 		}
 	}
 }
@@ -395,13 +417,15 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 // 本轮若是某个已到点的当日失败重试，先把触发来源判成 retry 并消费掉该重试；
 // 否则就是正常排程轮次（ledger.go 的 takeRetryTrigger，判据与 nextWake 同源）。
 func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
+	if k == taskCheckin {
+		s.dispatchCheckin(ctx)
+		return
+	}
 	trigger := triggerSchedule
 	if s.takeRetryTrigger(k, time.Now()) {
 		trigger = triggerRetry
 	}
 	switch k {
-	case taskCheckin:
-		s.runCheckin(trigger)
 	case taskTravel:
 		s.runTravel(ctx, trigger)
 	case taskActivity:
@@ -415,6 +439,25 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 	}
 }
 
+// dispatchCheckin 取得签到锁后才消费重试。手动签到进行中时可取消地等待，
+// 避免先消费排期再因 ErrBusy 丢失失败账号；等待期间手动成功也会更新名单。
+func (s *Scheduler) dispatchCheckin(ctx context.Context) {
+	for !s.checkinMu.TryLock() {
+		if !sleepCtx(ctx, 100*time.Millisecond) {
+			return
+		}
+	}
+	defer s.checkinMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	trigger := triggerSchedule
+	if s.takeRetryTrigger(taskCheckin, time.Now()) {
+		trigger = triggerRetry
+	}
+	s.runCheckinLocked(trigger)
+}
+
 // RunCheckinNow 立即签到的人工入口（/admin/tasks/checkin/run、一次性工具、测试）。
 // 与定时轮次的差别只在台账的 trigger 标记：人工触发的失败不排当日重试
 // （见 recordRun 的注释）。
@@ -426,8 +469,30 @@ func (s *Scheduler) RunCheckinNow() { s.runCheckin(triggerManual) }
 // out 为空 → total=0、fail=0 → 不判全灭、不排重试，这是对的——「与另一次签到
 // 撞车」不是失败。
 func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
+	if !s.checkinMu.TryLock() {
+		return nil, ErrBusy
+	}
+	defer s.checkinMu.Unlock()
+	return s.runCheckinLocked(trigger)
+}
+
+func (s *Scheduler) runCheckinLocked(trigger string) ([]CheckinOutcome, error) {
 	started := time.Now()
-	out, err := s.CheckinAll()
+	var targets map[string]struct{}
+	if trigger == triggerRetry {
+		s.checkinRetryMu.Lock()
+		if s.checkinRetryDay == travelDay(time.Now()) {
+			targets = s.checkinRetry
+		}
+		s.checkinRetry = nil
+		s.checkinRetryDay = ""
+		s.checkinRetryMu.Unlock()
+		if len(targets) == 0 {
+			log.Printf("retry checkin: 无本进程失败账号明细，跳过")
+			return nil, nil
+		}
+	}
+	out, retryable, err := s.checkinAll(targets)
 	if err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
 	}
@@ -445,6 +510,13 @@ func (s *Scheduler) runCheckin(trigger string) ([]CheckinOutcome, error) {
 			t.fail++
 		}
 	}
+	if err == nil && trigger != triggerManual {
+		s.checkinRetryMu.Lock()
+		s.checkinRetry = retryable
+		s.checkinRetryDay = travelDay(time.Now())
+		s.checkinRetryMu.Unlock()
+	}
+	t.retryableCheckin = len(retryable) > 0
 	s.recordRun(taskCheckin, trigger, started, t)
 	return out, err
 }
@@ -460,14 +532,45 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		return nil, ErrBusy
 	}
 	defer s.checkinMu.Unlock()
+	out, _, err := s.checkinAll(nil)
+	return out, err
+}
 
+// retryableCheckinError 将网络传输错误、5xx 和签到业务码 10000 视为瞬时故障。
+func retryableCheckinError(err error) bool {
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		// doJSON 将 2xx 业务错误按固定格式编码；精确限定状态与码边界。
+		return (ue.Status >= 500 && ue.Status < 600) ||
+			(ue.Status >= 200 && ue.Status < 300 && strings.HasPrefix(ue.Msg, "code=10000 msg="))
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
+// 调用方必须持有 checkinMu，使执行结果和待重试名单的更新保持一致。
+func (s *Scheduler) checkinAll(targets map[string]struct{}) ([]CheckinOutcome, map[string]struct{}, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
+	retryable := make(map[string]struct{})
 	var okN, alreadyN, failN, skipN int
 	for _, st := range statuses {
+		if targets != nil {
+			if _, ok := targets[st.UID]; !ok {
+				continue
+			}
+		}
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
 			oc.Status, oc.Detail = CheckinSkipped, "disabled"
+			skipN++
+			out = append(out, oc)
+			continue
+		}
+		// 正在重新登录的账号：凭证即将被替换，此时用旧 refresh token 续期会
+		// 轮换出被丢弃的凭证，可能让新 token 失效。跳过本轮，等重登完成。
+		if s.cfg.Pool.Reauthenticating(st.UID) {
+			oc.Status, oc.Detail = CheckinSkipped, "reauthenticating"
 			skipN++
 			out = append(out, oc)
 			continue
@@ -533,10 +636,19 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			} else {
 				oc.Status = CheckinFail
 				oc.Detail = err.Error()
+				if retryableCheckinError(err) {
+					retryable[st.UID] = struct{}{}
+				}
 				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			}
 		} else {
 			oc.Status = CheckinOK
+		}
+		if oc.Status == CheckinOK || oc.Status == CheckinAlready {
+			// 手动或普通轮次提前完成签到时，清除尚在等待重试的账号。
+			s.checkinRetryMu.Lock()
+			delete(s.checkinRetry, st.UID)
+			s.checkinRetryMu.Unlock()
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
@@ -563,10 +675,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		out = append(out, oc)
 	}
 	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
-		len(statuses), okN, alreadyN, failN, skipN)
+		len(out), okN, alreadyN, failN, skipN)
 	// 顺带做一次签到活动到期预警（只读探测，不影响签到结果；见 checkin_activity.go）。
 	s.warnCheckinActivity(statuses)
-	return out, nil
+	return out, retryable, nil
 }
 
 // joinDetail 拼接多段原因，避免后一段覆盖前一段的失败信息。
@@ -601,8 +713,13 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 			t.skipped++
 			continue
 		}
+		// 重新登录中：跳过刷新，避免旧 refresh token 轮换出被丢弃的凭证。
+		if s.cfg.Pool.Reauthenticating(st.UID) {
+			t.skipped++
+			continue
+		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessTokenValue() == "" {
+		if a == nil || (a.AccessTokenValue() == "" && a.RefreshTokenValue() == "") {
 			t.skipped++
 			continue
 		}
@@ -617,6 +734,24 @@ func (s *Scheduler) runActivity(ctx context.Context, trigger string) {
 		}
 		first = false
 		t.total++
+		// 长时间离线后先续期，否则每天唯一一次上报可能直接用过期凭据失败。
+		if a.RefreshTokenValue() != "" && (a.AccessTokenValue() == "" || a.NeedsRefresh(checkinRefreshSkew)) {
+			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+				s.cfg.Pool.NoteRefreshFail(st.UID, err)
+				log.Printf("activity %s refresh: %v", logfmt.Label(st.UID, st.Nickname), err)
+				if a.AccessTokenValue() == "" || a.NeedsRefresh(0) {
+					t.fail++
+					continue
+				}
+			} else {
+				s.cfg.Pool.NoteRefreshOK(st.UID)
+				s.cfg.Pool.ClearSessionDead(st.UID)
+				a.BackfillRealm()
+				if err := a.SaveAtomic(); err != nil {
+					log.Printf("activity %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
+				}
+			}
+		}
 		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
 		ok := 0
@@ -850,6 +985,11 @@ func (s *Scheduler) runKeepalive(trigger string) {
 	var t runTally
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
+			t.skipped++
+			continue
+		}
+		// 重新登录中：跳过刷新，避免旧 refresh token 轮换出被丢弃的凭证。
+		if s.cfg.Pool.Reauthenticating(st.UID) {
 			t.skipped++
 			continue
 		}

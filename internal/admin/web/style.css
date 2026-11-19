@@ -407,6 +407,14 @@ tbody tr:last-child td {
   background: #fdf0e3;
   color: #9a4a00;
 }
+/* 需重新登录：refresh token 已失效，revive 救不回来，必须点「重新登录」。 */
+.status-badge.relogin {
+  background: #fdecec;
+  color: #b82737;
+}
+.status-detail.relogin-line {
+  color: #b82737;
+}
 .status-detail {
   display: block;
   max-width: 180px;
@@ -456,8 +464,58 @@ tbody tr:last-child td {
 }
 .table-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+/* 账号列表拖拽排序列：序号 + 把手。把手是唯一的拖拽起点（见 app.js dragstart），
+   避免选中行内文字时误移动整行。 */
+.drag-col,
+.drag-cell {
+  width: 48px;
+  white-space: nowrap;
+  text-align: center;
+  padding-left: 10px !important;
+  padding-right: 4px !important;
+}
+.order-index {
+  margin-right: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.drag-handle {
+  cursor: grab;
+  user-select: none;
+  color: #9aa3b2;
+  letter-spacing: -2px;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+#accounts-body tr.dragging {
+  opacity: 0.45;
+}
+#accounts-body tr.drag-over td {
+  border-top: 2px solid var(--indigo);
+}
+.order-buttons {
+  display: inline-flex;
+  gap: 3px;
+}
+.mini-button.icon-button {
+  min-width: 24px;
+  padding: 4px 6px;
+  line-height: 1;
+}
+.mini-button.relogin-button {
+  border-color: #c7d2fe;
+  color: #3730a3;
+}
+.mini-button.remove-button:hover {
+  border-color: #b82737;
+  color: #b82737;
 }
 .mini-button {
   background: #fff;

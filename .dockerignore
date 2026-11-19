@@ -1,5 +1,7 @@
 auths/
 data/
+.gocache/
+acl-recovery/
 *.tmp
 .git/
 .gitignore

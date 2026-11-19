@@ -519,6 +519,9 @@ type modelCooldown struct {
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// AccountOrder 控制台账号列表的展示顺序（uid 列表，见 Pool.order）。
+	// 可缺失（旧 state.json / Redis 快照）：缺失时按 uid 升序输出，零迁移成本。
+	AccountOrder []string `json:"account_order,omitempty"`
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。

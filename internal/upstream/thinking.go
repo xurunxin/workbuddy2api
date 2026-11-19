@@ -48,6 +48,41 @@ func isDeepSeekModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek")
 }
 
+// mirrorAssistantReasoning 将客户端历史推理镜像到 WorkBuddy 读取的 reasoning。
+// 保留源字段及非空的显式 reasoning，避免破坏其他上游的兼容性。
+func mirrorAssistantReasoning(obj map[string]any) {
+	msgs, _ := obj["messages"].([]any)
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok || msg["role"] != "assistant" {
+			continue
+		}
+		if existing, ok := msg["reasoning"].(string); ok && existing != "" {
+			continue
+		}
+		if text, ok := msg["reasoning_content"].(string); ok && text != "" {
+			msg["reasoning"] = text
+			continue
+		}
+		details, _ := msg["reasoning_details"].([]any)
+		var text strings.Builder
+		for _, rawDetail := range details {
+			detail, ok := rawDetail.(map[string]any)
+			if !ok {
+				continue
+			}
+			if part, ok := detail["text"].(string); ok {
+				text.WriteString(part)
+			} else if part, ok := detail["summary"].(string); ok {
+				text.WriteString(part)
+			}
+		}
+		if text.Len() > 0 {
+			msg["reasoning"] = text.String()
+		}
+	}
+}
+
 // backfillReasoningContent DeepSeek 多轮一致性：保证每条 assistant 消息带
 // reasoning_content 字段且值为 string——即 requiresReasoningContentOnAssistantMessages
 // （官方客户端 matches 规则，issue #165 对齐官方 apply 门控）。

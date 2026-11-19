@@ -245,6 +245,66 @@ func (a *Auth) ExpiresAtValue() int64 {
 	return a.ExpiresAt
 }
 
+// FilePathValue 加锁读取来源文件路径。RefreshToken/SaveAtomic 会改写/读取
+// FilePath，重新登录替换凭证时需要与它们串行，避免读到半更新状态。
+func (a *Auth) FilePathValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.FilePath
+}
+
+// DetachSource 清空 FilePath，使该凭证对象后续的 SaveAtomic 必然失败。
+//
+// 用途：重新登录成功后，池里换成了新凭证对象，但调度器/在途请求可能仍持有旧
+// 指针并在稍后调用 SaveAtomic——若不摘除路径，旧对象的刷新结果会把刚写入的新
+// 凭证覆盖回旧值。调用方应在写入新凭证之前调用本方法（锁内清空），保证旧对象
+// 的任何延迟写回都发生在替换之后且必定失败。
+func (a *Auth) DetachSource() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.FilePath = ""
+}
+
+// SetSource 恢复/设置凭证来源路径（重新登录保存失败时的回滚用）。
+func (a *Auth) SetSource(path string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.FilePath = path
+}
+
+// AdoptMetadata 从旧凭证继承「重新登录不应丢失」的运维元数据：
+// 显式 realm（手工指定的 cn/global）、业务分组、设备风控 token。
+// 新凭证已有值的字段不覆盖——新授权的值优先，旧值只作缺省补齐。
+func (a *Auth) AdoptMetadata(old *Auth) {
+	if a == nil || old == nil {
+		return
+	}
+	old.mu.Lock()
+	realm, device := old.realm, old.DeviceToken
+	old.mu.Unlock()
+	groups := old.GroupsValue()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.realm == "" {
+		a.realm = realm
+	}
+	if a.DeviceToken == "" {
+		a.DeviceToken = device
+	}
+	if len(a.Groups) == 0 && len(groups) > 0 {
+		a.Groups = groups
+	}
+}
+
 // CredWrittenAt 返回凭证文件（FilePath）的最近写回时刻，ok=false 表示文件不可 stat
 // （不存在 / 无权限 / FilePath 为空）。
 //
@@ -256,10 +316,14 @@ func (a *Auth) ExpiresAtValue() int64 {
 //
 // 不返回 error：巡检/状态透出是**尽力而为**的观测，缺文件不该让它失败或报错。
 func (a *Auth) CredWrittenAt() (time.Time, bool) {
-	if a == nil || a.FilePath == "" {
+	if a == nil {
 		return time.Time{}, false
 	}
-	fi, err := os.Stat(a.FilePath)
+	path := a.FilePathValue()
+	if path == "" {
+		return time.Time{}, false
+	}
+	fi, err := os.Stat(path)
 	if err != nil {
 		return time.Time{}, false
 	}

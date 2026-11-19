@@ -28,17 +28,16 @@ type runTally struct {
 	// interrupted 本轮被 ctx 取消打断（优雅停机），计数是**部分**的。
 	// 此时不判全灭、不排重试：一轮只跑了 3 个号就停机，不代表上游全挂。
 	interrupted bool
+	// 仅签到请求本身发生可重试错误时置位；余额等后续阶段的失败不触发签到重试。
+	retryableCheckin bool
 }
 
 // recordRun 结束一轮执行：写台账，必要时排定当日失败重试，并返回这条记录。
 //
 // 全灭判据（AllFailed）：**有失败，且没有任何一个账号真正做成**（ok+already==0）。
 //
-// 为什么不是「失败率超阈值」：只要还有账号成功，就证明上游是通的，失败是账号级
-// 的（token 过期、单号被限流），重试只会对同一批注定失败的账号再打一遍上游——
-// 既无收益，又正好撞在本仓库一直避免的风控雷区上。反过来「一个都没成」几乎只
-// 有一个解释：网络/DNS 未就绪、上游整体抖动、WAF 拦截——这正是重试能救的场景。
-// 这条判据同时保证了「成功路径零新增上游请求」。
+// AllFailed 只描述台账结果；签到的重试按请求的瞬时错误及失败账号名单决定，
+// 因此部分失败也可重试。其他任务仍只在整轮失败时排重试。
 //
 // 人工触发（triggerManual）**不排重试**：运维刚点过一次，自己会判断要不要再点；
 // 自动重跑会让一次人工操作静默变成两次上游写。
@@ -61,18 +60,29 @@ func (s *Scheduler) recordRun(kind taskKind, trigger string, started time.Time, 
 	}
 	s.ledger.Record(r)
 
-	if trigger == triggerManual || !r.AllFailed {
+	if trigger == triggerManual || t.interrupted {
+		return r
+	}
+	if kind == taskCheckin {
+		if !t.retryableCheckin {
+			return r
+		}
+	} else if !r.AllFailed {
+		return r
+	}
+	// 若此前已有未来重试，不覆盖排期或重复消耗额度；签到目标由最新一轮更新。
+	if _, pending := s.ledger.ArmedRetries(finished)[kind.String()]; pending {
 		return r
 	}
 	delay := time.Duration(s.cfg.RetryDelayMinutes) * time.Minute
 	d := s.ledger.PlanRetry(kind.String(), finished, delay, s.cfg.RetryMaxPerDay)
 	if d.Reason == "" {
-		log.Printf("WARN: %s 本轮全灭（fail=%d ok=%d already=%d）—— %s 自动重试（当日第 %d 次，schedule.retry_delay_minutes）",
+		log.Printf("WARN: %s 本轮失败（fail=%d ok=%d already=%d）—— %s 自动重试（当日第 %d 次，schedule.retry_delay_minutes）",
 			kind, r.Fail, r.OK, r.Already, d.At.Format("15:04"), d.Used)
 		return r
 	}
 	// 全灭但没排上：必须说清是哪一种，否则运维只会看到「全灭」然后困惑为什么没补跑。
-	log.Printf("WARN: %s 本轮全灭（fail=%d）但未安排重试：%s（schedule.retry_delay_minutes / schedule.retry_max_per_day）",
+	log.Printf("WARN: %s 本轮失败（fail=%d）但未安排重试：%s（schedule.retry_delay_minutes / schedule.retry_max_per_day）",
 		kind, r.Fail, d.Reason)
 	return r
 }

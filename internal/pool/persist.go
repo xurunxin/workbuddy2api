@@ -141,6 +141,7 @@ func (p *Pool) load() {
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
+	p.applyOrderLocked(sf.AccountOrder)
 }
 
 // applyAccountsLocked 用持久化账号状态覆盖/插入 byUID（placeholder 凭证，Add 时换全）。
@@ -254,6 +255,30 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
+	p.applyOrderLocked(s.AccountOrder)
+}
+
+// applyOrderLocked 恢复运维设置的展示顺序：过滤未知 uid 与重复项（state.json 手工
+// 编辑/旧版本残留的防御），未列入的账号由 List()/orderedUIDsLocked 自动按 uid 追加。
+// 调用方必须已持有 p.mu。
+func (p *Pool) applyOrderLocked(order []string) {
+	if len(order) == 0 {
+		p.order = nil
+		return
+	}
+	seen := make(map[string]bool, len(order))
+	kept := make([]string, 0, len(order))
+	for _, uid := range order {
+		if seen[uid] {
+			continue
+		}
+		if _, ok := p.byUID[uid]; !ok {
+			continue
+		}
+		seen[uid] = true
+		kept = append(kept, uid)
+	}
+	p.order = kept
 }
 
 // saveLocked 把内存状态原子落盘（tmp + rename），并 fire-and-forget 镜像一份快照
@@ -434,5 +459,9 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			ModelCosts:       mcosts,
 		}
 	}
+	// 展示顺序随状态一起落盘（控制台拖拽排序重启保留）。写完整顺序而非只写显式
+	// order：新账号按 uid 追加的隐式位置也一并固化，避免下次重启时因 map 遍历/新增
+	// 账号变化而抖动。
+	sf.AccountOrder = append([]string(nil), p.orderedUIDsLocked()...)
 	return sf
 }
